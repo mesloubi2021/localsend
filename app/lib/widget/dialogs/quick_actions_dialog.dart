@@ -1,4 +1,8 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
+import 'package:legalize/legalize.dart';
+import 'package:localsend_app/config/theme.dart';
 import 'package:localsend_app/gen/strings.g.dart';
 import 'package:localsend_app/provider/selection/selected_receiving_files_provider.dart';
 import 'package:localsend_app/widget/labeled_checkbox.dart';
@@ -21,7 +25,7 @@ enum _QuickAction {
 }
 
 class QuickActionsDialog extends StatefulWidget {
-  const QuickActionsDialog({Key? key}) : super(key: key);
+  const QuickActionsDialog({super.key});
 
   @override
   State<QuickActionsDialog> createState() => _QuickActionsDialogState();
@@ -37,6 +41,26 @@ class _QuickActionsDialogState extends State<QuickActionsDialog> with Refena {
 
   // random
   final _randomUuid = const Uuid().v4();
+
+  // sanity check
+  bool _isValid = true;
+
+  bool _validate(String input) {
+    if (!isValidFilename(input, os: Platform.operatingSystem) && input.isNotEmpty) {
+      setState(() {
+        _isValid = false;
+      });
+      return false;
+    }
+
+    if (!_isValid) {
+      setState(() {
+        _isValid = true;
+      });
+    }
+
+    return true;
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -74,11 +98,19 @@ class _QuickActionsDialogState extends State<QuickActionsDialog> with Refena {
             TextField(
               autofocus: true,
               onChanged: (s) {
+                _validate(s);
                 setState(() {
                   _prefix = s;
                 });
               },
             ),
+            const SizedBox(height: 5),
+            Visibility(
+                visible: !_isValid,
+                child: Text(
+                  t.sanitization.invalid,
+                  style: TextStyle(color: Theme.of(context).colorScheme.warning),
+                )),
             const SizedBox(height: 10),
             LabeledCheckbox(
               label: t.dialogs.quickActions.padZero,
@@ -112,12 +144,15 @@ class _QuickActionsDialogState extends State<QuickActionsDialog> with Refena {
         ),
         ElevatedButton(
           style: ElevatedButton.styleFrom(
-            backgroundColor: Theme.of(context).buttonTheme.colorScheme!.primary,
-            foregroundColor: Theme.of(context).buttonTheme.colorScheme!.onPrimary,
+            backgroundColor: Theme.of(context).colorScheme.primary,
+            foregroundColor: Theme.of(context).colorScheme.onPrimary,
           ),
           onPressed: () {
             switch (_action) {
               case _QuickAction.counter:
+                if (!_isValid) {
+                  return;
+                }
                 ref.notifier(selectedReceivingFilesProvider).applyCounter(
                       prefix: _prefix,
                       padZero: _padZero,

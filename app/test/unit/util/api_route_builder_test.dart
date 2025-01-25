@@ -1,5 +1,5 @@
-import 'package:localsend_app/model/device.dart';
-import 'package:localsend_app/util/api_route_builder.dart';
+import 'package:common/api_route_builder.dart';
+import 'package:common/model/device.dart';
 import 'package:test/test.dart';
 
 void main() {

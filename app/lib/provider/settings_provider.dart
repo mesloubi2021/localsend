@@ -1,178 +1,243 @@
+import 'package:collection/collection.dart';
+import 'package:common/isolate.dart';
+import 'package:common/model/device.dart';
 import 'package:flutter/material.dart';
 import 'package:localsend_app/gen/strings.g.dart';
-import 'package:localsend_app/model/device.dart';
 import 'package:localsend_app/model/persistence/color_mode.dart';
 import 'package:localsend_app/model/send_mode.dart';
 import 'package:localsend_app/model/state/settings_state.dart';
 import 'package:localsend_app/provider/persistence_provider.dart';
 import 'package:refena_flutter/refena_flutter.dart';
 
-final settingsProvider = NotifierProvider<SettingsNotifier, SettingsState>((ref) {
-  return SettingsNotifier();
-});
+final _listEq = const ListEquality().equals;
 
-class SettingsNotifier extends Notifier<SettingsState> {
-  late PersistenceService _service;
-
-  SettingsNotifier();
-
-  @override
-  SettingsState init() {
-    _service = ref.read(persistenceProvider);
-    return SettingsState(
-      showToken: _service.getShowToken(),
-      alias: _service.getAlias(),
-      theme: _service.getTheme(),
-      colorMode: _service.getColorMode(),
-      locale: _service.getLocale(),
-      port: _service.getPort(),
-      multicastGroup: _service.getMulticastGroup(),
-      destination: _service.getDestination(),
-      saveToGallery: _service.isSaveToGallery(),
-      saveToHistory: _service.isSaveToHistory(),
-      quickSave: _service.isQuickSave(),
-      minimizeToTray: _service.isMinimizeToTray(),
-      launchAtStartup: _service.isLaunchAtStartup(),
-      autoStartLaunchMinimized: _service.isAutoStartLaunchMinimized(),
-      https: _service.isHttps(),
-      sendMode: _service.getSendMode(),
-      saveWindowPlacement: _service.getSaveWindowPlacement(),
-      enableAnimations: _service.getEnableAnimations(),
-      deviceType: _service.getDeviceType(),
-      deviceModel: _service.getDeviceModel(),
-    );
+final settingsProvider = NotifierProvider<SettingsService, SettingsState>((ref) {
+  return SettingsService(ref.read(persistenceProvider));
+}, onChanged: (_, next, ref) {
+  final syncState = ref.read(parentIsolateProvider).syncState;
+  if (_listEq(syncState.networkWhitelist, next.networkWhitelist) &&
+      _listEq(syncState.networkBlacklist, next.networkBlacklist) &&
+      syncState.multicastGroup == next.multicastGroup &&
+      syncState.discoveryTimeout == next.discoveryTimeout) {
+    return;
   }
 
+  ref.redux(parentIsolateProvider).dispatch(IsolateSyncSettingsAction(
+        networkWhitelist: next.networkWhitelist,
+        networkBlacklist: next.networkBlacklist,
+        multicastGroup: next.multicastGroup,
+        discoveryTimeout: next.discoveryTimeout,
+      ));
+});
+
+class SettingsService extends PureNotifier<SettingsState> {
+  final PersistenceService _persistence;
+
+  SettingsService(this._persistence);
+
+  @override
+  SettingsState init() => SettingsState(
+        showToken: _persistence.getShowToken(),
+        alias: _persistence.getAlias(),
+        theme: _persistence.getTheme(),
+        colorMode: _persistence.getColorMode(),
+        locale: _persistence.getLocale(),
+        port: _persistence.getPort(),
+        networkWhitelist: _persistence.getNetworkWhitelist(),
+        networkBlacklist: _persistence.getNetworkBlacklist(),
+        multicastGroup: _persistence.getMulticastGroup(),
+        destination: _persistence.getDestination(),
+        saveToGallery: _persistence.isSaveToGallery(),
+        saveToHistory: _persistence.isSaveToHistory(),
+        quickSave: _persistence.isQuickSave(),
+        quickSaveFromFavorites: _persistence.isQuickSaveFromFavorites(),
+        receivePin: _persistence.getReceivePin(),
+        autoFinish: _persistence.isAutoFinish(),
+        minimizeToTray: _persistence.isMinimizeToTray(),
+        https: _persistence.isHttps(),
+        sendMode: _persistence.getSendMode(),
+        saveWindowPlacement: _persistence.getSaveWindowPlacement(),
+        enableAnimations: _persistence.getEnableAnimations(),
+        deviceType: _persistence.getDeviceType(),
+        deviceModel: _persistence.getDeviceModel(),
+        shareViaLinkAutoAccept: _persistence.getShareViaLinkAutoAccept(),
+        discoveryTimeout: _persistence.getDiscoveryTimeout(),
+        advancedSettings: _persistence.getAdvancedSettingsEnabled(),
+      );
+
   Future<void> setAlias(String alias) async {
-    await _service.setAlias(alias);
+    await _persistence.setAlias(alias);
     state = state.copyWith(
       alias: alias,
     );
   }
 
   Future<void> setTheme(ThemeMode theme) async {
-    await _service.setTheme(theme);
+    await _persistence.setTheme(theme);
     state = state.copyWith(
       theme: theme,
     );
   }
 
   Future<void> setColorMode(ColorMode mode) async {
-    await _service.setColorMode(mode);
+    await _persistence.setColorMode(mode);
     state = state.copyWith(
       colorMode: mode,
     );
   }
 
+  Future<void> setAdvancedSettingsEnabled(bool isEnabled) async {
+    await _persistence.setAdvancedSettingsEnabled(isEnabled);
+    state = state.copyWith(
+      advancedSettings: isEnabled,
+    );
+  }
+
   Future<void> setLocale(AppLocale? locale) async {
-    await _service.setLocale(locale);
+    await _persistence.setLocale(locale);
     state = state.copyWith(
       locale: locale,
     );
   }
 
   Future<void> setPort(int port) async {
-    await _service.setPort(port);
+    await _persistence.setPort(port);
     state = state.copyWith(
       port: port,
     );
   }
 
+  Future<void> setNetworkWhitelist(List<String>? whitelist) async {
+    await _persistence.setNetworkWhitelist(whitelist);
+    state = state.copyWith(
+      networkWhitelist: whitelist,
+    );
+  }
+
+  Future<void> setNetworkBlacklist(List<String>? blacklist) async {
+    await _persistence.setNetworkBlacklist(blacklist);
+    state = state.copyWith(
+      networkBlacklist: blacklist,
+    );
+  }
+
+  Future<void> setDiscoveryTimeout(int timeout) async {
+    await _persistence.setDiscoveryTimeout(timeout);
+    state = state.copyWith(
+      discoveryTimeout: timeout,
+    );
+  }
+
   Future<void> setMulticastGroup(String group) async {
-    await _service.setMulticastGroup(group);
+    await _persistence.setMulticastGroup(group);
     state = state.copyWith(
       multicastGroup: group,
     );
   }
 
   Future<void> setDestination(String? destination) async {
-    await _service.setDestination(destination);
+    await _persistence.setDestination(destination);
     state = state.copyWith(
       destination: destination,
     );
   }
 
   Future<void> setSaveToGallery(bool saveToGallery) async {
-    await _service.setSaveToGallery(saveToGallery);
+    await _persistence.setSaveToGallery(saveToGallery);
     state = state.copyWith(
       saveToGallery: saveToGallery,
     );
   }
 
   Future<void> setSaveToHistory(bool saveToHistory) async {
-    await _service.setSaveToHistory(saveToHistory);
+    await _persistence.setSaveToHistory(saveToHistory);
     state = state.copyWith(
       saveToHistory: saveToHistory,
     );
   }
 
   Future<void> setQuickSave(bool quickSave) async {
-    await _service.setQuickSave(quickSave);
+    await _persistence.setQuickSave(quickSave);
     state = state.copyWith(
       quickSave: quickSave,
     );
   }
 
+  Future<void> setQuickSaveFromFavorites(bool quickSaveFromFavorites) async {
+    await _persistence.setQuickSaveFromFavorites(quickSaveFromFavorites);
+    state = state.copyWith(
+      quickSaveFromFavorites: quickSaveFromFavorites,
+    );
+  }
+
+  Future<void> setReceivePin(String? receivePin) async {
+    await _persistence.setReceivePin(receivePin);
+    state = state.copyWith(
+      receivePin: receivePin,
+    );
+  }
+
+  Future<void> setAutoFinish(bool autoFinish) async {
+    await _persistence.setAutoFinish(autoFinish);
+    state = state.copyWith(
+      autoFinish: autoFinish,
+    );
+  }
+
   Future<void> setMinimizeToTray(bool minimizeToTray) async {
-    await _service.setMinimizeToTray(minimizeToTray);
+    await _persistence.setMinimizeToTray(minimizeToTray);
     state = state.copyWith(
       minimizeToTray: minimizeToTray,
     );
   }
 
-  Future<void> setLaunchAtStartup(bool launchAtStartup) async {
-    await _service.setLaunchAtStartup(launchAtStartup);
-    state = state.copyWith(
-      launchAtStartup: launchAtStartup,
-    );
-  }
-
-  Future<void> setAutoStartLaunchMinimized(bool launchMinimized) async {
-    await _service.setAutoStartLaunchMinimized(launchMinimized);
-    state = state.copyWith(
-      autoStartLaunchMinimized: launchMinimized,
-    );
-  }
-
   Future<void> setHttps(bool https) async {
-    await _service.setHttps(https);
+    await _persistence.setHttps(https);
     state = state.copyWith(
       https: https,
     );
   }
 
   Future<void> setSendMode(SendMode mode) async {
-    await _service.setSendMode(mode);
+    await _persistence.setSendMode(mode);
     state = state.copyWith(
       sendMode: mode,
     );
   }
 
   Future<void> setSaveWindowPlacement(bool savePlacement) async {
-    await _service.setSaveWindowPlacement(savePlacement);
+    await _persistence.setSaveWindowPlacement(savePlacement);
     state = state.copyWith(
       saveWindowPlacement: savePlacement,
     );
   }
 
   Future<void> setEnableAnimations(bool enableAnimations) async {
-    await _service.setEnableAnimations(enableAnimations);
+    await _persistence.setEnableAnimations(enableAnimations);
     state = state.copyWith(
       enableAnimations: enableAnimations,
     );
   }
 
   Future<void> setDeviceType(DeviceType deviceType) async {
-    await _service.setDeviceType(deviceType);
+    await _persistence.setDeviceType(deviceType);
     state = state.copyWith(
       deviceType: deviceType,
     );
   }
 
   Future<void> setDeviceModel(String deviceModel) async {
-    await _service.setDeviceModel(deviceModel);
+    await _persistence.setDeviceModel(deviceModel);
     state = state.copyWith(
       deviceModel: deviceModel,
+    );
+  }
+
+  Future<void> setShareViaLinkAutoAccept(bool shareViaLinkAutoAccept) async {
+    await _persistence.setShareViaLinkAutoAccept(shareViaLinkAutoAccept);
+
+    state = state.copyWith(
+      shareViaLinkAutoAccept: shareViaLinkAutoAccept,
     );
   }
 }

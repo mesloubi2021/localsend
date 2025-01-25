@@ -1,12 +1,12 @@
 import 'package:flutter/material.dart';
-import 'package:localsend_app/theme.dart';
+import 'package:localsend_app/config/theme.dart';
 
 /// A [DropdownButton] with a custom theme.
 /// Currently, there is no easy way to apply color and border radius to all [DropdownButton].
 class CustomDropdownButton<T> extends StatelessWidget {
   final T value;
   final List<DropdownMenuItem<T>> items;
-  final ValueChanged<T?>? onChanged;
+  final ValueChanged<T>? onChanged;
   final bool expanded;
 
   const CustomDropdownButton({
@@ -27,7 +27,13 @@ class CustomDropdownButton<T> extends StatelessWidget {
         underline: Container(),
         borderRadius: Theme.of(context).inputDecorationTheme.borderRadius,
         items: items,
-        onChanged: onChanged,
+        onChanged: onChanged == null
+            ? null
+            : (value) {
+                if (value != null) {
+                  onChanged!(value);
+                }
+              },
       ),
     );
   }

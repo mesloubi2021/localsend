@@ -1,23 +1,12 @@
+import 'package:common/model/device.dart';
+import 'package:common/model/device_info_result.dart';
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter/foundation.dart';
-import 'package:localsend_app/model/device.dart';
-import 'package:slang/builder/model/enums.dart';
-import 'package:slang/builder/utils/string_extensions.dart';
+// ignore: implementation_imports
+import 'package:slang/src/builder/model/enums.dart';
 
-class DeviceInfoResult {
-  final DeviceType deviceType;
-  final String? deviceModel;
-
-  // Used to properly set Edge-to-Edge mode on Android
-  // See https://github.com/flutter/flutter/issues/90098
-  final int? androidSdkInt;
-
-  DeviceInfoResult({
-    required this.deviceType,
-    required this.deviceModel,
-    required this.androidSdkInt,
-  });
-}
+// ignore: implementation_imports
+import 'package:slang/src/builder/utils/string_extensions.dart';
 
 Future<DeviceInfoResult> getDeviceInfo() async {
   final plugin = DeviceInfoPlugin();

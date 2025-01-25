@@ -52,6 +52,10 @@ class TroubleshootPage extends StatelessWidget {
             ),
           ),
           _TroubleshootItem(
+            symptomText: t.troubleshootPage.noDiscovery.symptom,
+            solutionText: t.troubleshootPage.noDiscovery.solution,
+          ),
+          _TroubleshootItem(
             symptomText: t.troubleshootPage.noConnection.symptom,
             solutionText: t.troubleshootPage.noConnection.solution,
           ),
@@ -156,8 +160,8 @@ class _FixButton extends StatelessWidget {
   Widget build(BuildContext context) {
     return ElevatedButton(
       style: ElevatedButton.styleFrom(
-        backgroundColor: Theme.of(context).buttonTheme.colorScheme!.primary,
-        foregroundColor: Theme.of(context).buttonTheme.colorScheme!.onPrimary,
+        backgroundColor: Theme.of(context).colorScheme.primary,
+        foregroundColor: Theme.of(context).colorScheme.onPrimary,
       ),
       onPressed: () async {
         if (onTap != null) {

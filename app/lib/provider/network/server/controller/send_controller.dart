@@ -2,22 +2,25 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:localsend_app/constants.dart';
+import 'package:common/api_route_builder.dart';
+import 'package:common/constants.dart';
+import 'package:common/model/dto/file_dto.dart';
+import 'package:common/model/dto/info_dto.dart';
+import 'package:common/model/dto/receive_request_response_dto.dart';
+import 'package:common/model/file_type.dart';
+import 'package:common/util/stream.dart';
 import 'package:localsend_app/gen/assets.gen.dart';
 import 'package:localsend_app/gen/strings.g.dart';
 import 'package:localsend_app/model/cross_file.dart';
-import 'package:localsend_app/model/dto/file_dto.dart';
-import 'package:localsend_app/model/dto/info_dto.dart';
-import 'package:localsend_app/model/dto/receive_request_response_dto.dart';
-import 'package:localsend_app/model/file_type.dart';
 import 'package:localsend_app/model/state/send/web/web_send_file.dart';
 import 'package:localsend_app/model/state/send/web/web_send_session.dart';
 import 'package:localsend_app/model/state/send/web/web_send_state.dart';
 import 'package:localsend_app/provider/device_info_provider.dart';
+import 'package:localsend_app/provider/network/server/controller/common.dart';
 import 'package:localsend_app/provider/network/server/server_utils.dart';
-import 'package:localsend_app/util/api_route_builder.dart';
-import 'package:shelf/shelf.dart';
-import 'package:shelf_router/shelf_router.dart';
+import 'package:localsend_app/provider/settings_provider.dart';
+import 'package:localsend_app/util/simple_server.dart';
+import 'package:uri_content/uri_content.dart';
 import 'package:uuid/uuid.dart';
 
 const _uuid = Uuid();
@@ -30,39 +33,42 @@ class SendController {
 
   /// Installs all routes for receiving files.
   void installRoutes({
-    required Router router,
+    required SimpleServerRouteBuilder router,
     required String alias,
     required String fingerprint,
   }) {
-    router.get('/', (Request request) async {
+    router.get('/', (HttpRequest request) async {
       final state = server.getState();
       if (state.webSendState == null) {
         // There is no web send state
-        return server.responseAsset(403, Assets.web.error403);
+        return await request.respondAsset(403, Assets.web.error403);
       }
 
-      return server.responseAsset(200, Assets.web.index);
+      return await request.respondAsset(200, Assets.web.index);
     });
 
-    router.get('/main.js', (Request request) async {
+    router.get('/main.js', (HttpRequest request) async {
       final state = server.getState();
       if (state.webSendState == null) {
         // There is no web send state
-        return server.responseAsset(403, Assets.web.error403);
+        return await request.respondAsset(403, Assets.web.error403);
       }
 
-      return server.responseAsset(200, Assets.web.main, 'text/javascript; charset=utf-8');
+      return await request.respondAsset(200, Assets.web.main, 'text/javascript; charset=utf-8');
     });
 
-    router.get('/i18n.json', (Request request) async {
+    router.get('/i18n.json', (HttpRequest request) async {
       final state = server.getState();
       if (state.webSendState == null) {
         // There is no web send state
-        return server.responseJson(403, message: 'Web send not initialized.');
+        return await request.respondJson(403, message: 'Web send not initialized.');
       }
 
-      return server.responseJson(200, body: {
+      return await request.respondJson(200, body: {
         'waiting': t.web.waiting,
+        'enterPin': t.web.enterPin,
+        'invalidPin': t.web.invalidPin,
+        'tooManyAttempts': t.web.tooManyAttempts,
         'rejected': t.web.rejected,
         'files': t.web.files,
         'fileName': t.web.fileName,
@@ -70,20 +76,20 @@ class SendController {
       });
     });
 
-    router.post(ApiRoute.prepareDownload.v2, (Request request) async {
+    router.post(ApiRoute.prepareDownload.v2, (HttpRequest request) async {
       final state = server.getState();
       if (state.webSendState == null) {
         // There is no web send state
-        return server.responseJson(403, message: 'Web send not initialized.');
+        return request.respondJson(403, message: 'Web send not initialized.');
       }
 
-      final requestSessionId = request.url.queryParameters['sessionId'];
+      final requestSessionId = request.uri.queryParameters['sessionId'];
       if (requestSessionId != null) {
         // Check if the user already has permission
         final session = server.getState().webSendState?.sessions[requestSessionId];
         if (session != null && session.responseHandler == null && session.ip == request.ip) {
           final deviceInfo = server.ref.read(deviceInfoProvider);
-          return server.responseJson(200,
+          return await request.respondJson(200,
               body: ReceiveRequestResponseDto(
                 info: InfoDto(
                   alias: alias,
@@ -101,8 +107,18 @@ class SendController {
         }
       }
 
+      final pinCorrect = await checkPin(
+        server: server,
+        pin: state.webSendState!.pin,
+        pinAttempts: state.webSendState!.pinAttempts,
+        request: request,
+      );
+      if (!pinCorrect) {
+        return;
+      }
+
       final streamController = StreamController<bool>();
-      final sessionId = _uuid.v4();
+      final sessionId = request.ip;
       server.setState(
         (oldState) => oldState!.copyWith(
           webSendState: oldState.webSendState!.copyWith(
@@ -119,7 +135,7 @@ class SendController {
         ),
       );
 
-      final accepted = await streamController.stream.first;
+      final accepted = state.webSendState?.autoAccept == true || await streamController.stream.first;
       if (!accepted) {
         // user rejected the file transfer
         server.setState(
@@ -132,7 +148,7 @@ class SendController {
             ),
           ),
         );
-        return server.responseJson(403, message: 'File transfer rejected.');
+        return await request.respondJson(403, message: 'File transfer rejected.');
       }
 
       server.setState(
@@ -148,7 +164,7 @@ class SendController {
         ),
       );
       final deviceInfo = server.ref.read(deviceInfoProvider);
-      return server.responseJson(200,
+      return await request.respondJson(200,
           body: ReceiveRequestResponseDto(
             info: InfoDto(
               alias: alias,
@@ -165,46 +181,55 @@ class SendController {
           ).toJson());
     });
 
-    router.get(ApiRoute.download.v2, (Request request) async {
-      final sessionId = request.url.queryParameters['sessionId'];
+    router.get(ApiRoute.download.v2, (HttpRequest request) async {
+      final sessionId = request.uri.queryParameters['sessionId'];
       if (sessionId == null) {
-        return server.responseJson(400, message: 'Missing sessionId.');
+        return await request.respondJson(400, message: 'Missing sessionId.');
       }
 
       final session = server.getState().webSendState?.sessions[sessionId];
       if (session == null || session.responseHandler != null || session.ip != request.ip) {
-        return server.responseJson(403, message: 'Invalid sessionId.');
+        return await request.respondJson(403, message: 'Invalid sessionId.');
       }
 
-      final fileId = request.url.queryParameters['fileId'];
+      final fileId = request.uri.queryParameters['fileId'];
       if (fileId == null) {
-        return server.responseJson(400, message: 'Missing fileId.');
+        return await request.respondJson(400, message: 'Missing fileId.');
       }
 
       final file = server.getState().webSendState?.files[fileId];
       if (file == null) {
-        return server.responseJson(403, message: 'Invalid fileId.');
+        return await request.respondJson(403, message: 'Invalid fileId.');
       }
 
       final fileName = file.file.fileName.replaceAll('/', '-'); // File name may be inside directories
-      final headers = {
-        'content-type': 'application/octet-stream',
-        'content-disposition': 'attachment; filename="${Uri.encodeComponent(fileName)}"',
-        'content-length': '${file.file.size}',
-      };
+
+      request.response
+        ..statusCode = 200
+        ..headers.set('content-type', 'application/octet-stream')
+        ..headers.set('content-disposition', 'attachment; filename="${Uri.encodeComponent(fileName)}"')
+        ..headers.set('content-length', '${file.file.size}');
 
       if (file.bytes != null) {
-        return Response(
-          200,
-          body: file.bytes!,
-          headers: headers,
-        );
+        final byteStream = Stream.fromIterable([file.bytes!]);
+        final (streamController, subscription) = byteStream.digested();
+
+        await request.response.addStream(streamController.stream).then((_) {
+          request.response.close();
+          subscription.cancel();
+        });
       } else {
-        return Response(
-          200,
-          body: File(file.path!).openRead(),
-          headers: headers,
-        );
+        final path = file.path!;
+        final tmpfile = File(file.path!);
+        request.response.headers.set('content-length', '${tmpfile.lengthSync()}');
+
+        final fileStream = path.startsWith('content://') ? UriContent().getContentStream(Uri.parse(file.path!)) : tmpfile.openRead();
+        final (streamController, subscription) = fileStream.digested();
+
+        await request.response.addStream(streamController.stream).then((_) {
+          request.response.close();
+          subscription.cancel();
+        });
       }
     });
   }
@@ -226,6 +251,12 @@ class SendController {
               preview: files.first.fileType == FileType.text && files.first.bytes != null
                   ? utf8.decode(files.first.bytes!) // send simple message by embedding it into the preview
                   : null,
+              metadata: file.lastModified != null || file.lastAccessed != null
+                  ? FileMetadata(
+                      lastModified: file.lastModified,
+                      lastAccessed: file.lastAccessed,
+                    )
+                  : null,
               legacy: false,
             ),
             asset: file.asset,
@@ -234,6 +265,9 @@ class SendController {
           ),
         );
       }))),
+      autoAccept: server.ref.read(settingsProvider).shareViaLinkAutoAccept,
+      pin: null,
+      pinAttempts: {},
     );
 
     server.setState(

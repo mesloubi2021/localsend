@@ -8,16 +8,19 @@ list(APPEND FLUTTER_PLUGIN_LIST
   dynamic_color
   file_selector_windows
   gal
+  open_dir_windows
   pasteboard
   permission_handler_windows
-  screen_retriever
-  system_tray
+  screen_retriever_windows
   tray_manager
+  uri_content
   url_launcher_windows
   window_manager
+  windows_taskbar
 )
 
 list(APPEND FLUTTER_FFI_PLUGIN_LIST
+  rhttp
 )
 
 set(PLUGIN_BUNDLED_LIBRARIES)

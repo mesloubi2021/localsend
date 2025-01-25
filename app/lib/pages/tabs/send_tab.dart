@@ -1,19 +1,21 @@
 import 'package:collection/collection.dart';
+import 'package:common/model/device.dart';
+import 'package:common/model/session_status.dart';
 import 'package:flutter/material.dart';
+import 'package:localsend_app/config/theme.dart';
 import 'package:localsend_app/gen/strings.g.dart';
-import 'package:localsend_app/model/device.dart';
 import 'package:localsend_app/model/send_mode.dart';
-import 'package:localsend_app/model/session_status.dart';
 import 'package:localsend_app/pages/selected_files_page.dart';
 import 'package:localsend_app/pages/tabs/send_tab_vm.dart';
 import 'package:localsend_app/pages/troubleshoot_page.dart';
 import 'package:localsend_app/provider/animation_provider.dart';
 import 'package:localsend_app/provider/network/nearby_devices_provider.dart';
-import 'package:localsend_app/provider/network/scan_provider.dart';
+import 'package:localsend_app/provider/network/scan_facade.dart';
 import 'package:localsend_app/provider/network/send_provider.dart';
 import 'package:localsend_app/provider/progress_provider.dart';
+import 'package:localsend_app/provider/selection/selected_sending_files_provider.dart';
 import 'package:localsend_app/provider/settings_provider.dart';
-import 'package:localsend_app/theme.dart';
+import 'package:localsend_app/util/favorites.dart';
 import 'package:localsend_app/util/file_size_helper.dart';
 import 'package:localsend_app/util/native/file_picker.dart';
 import 'package:localsend_app/util/native/platform_check.dart';
@@ -22,236 +24,238 @@ import 'package:localsend_app/widget/custom_icon_button.dart';
 import 'package:localsend_app/widget/dialogs/add_file_dialog.dart';
 import 'package:localsend_app/widget/dialogs/send_mode_help_dialog.dart';
 import 'package:localsend_app/widget/file_thumbnail.dart';
+import 'package:localsend_app/widget/horizontal_clip_list_view.dart';
 import 'package:localsend_app/widget/list_tile/device_list_tile.dart';
 import 'package:localsend_app/widget/list_tile/device_placeholder_list_tile.dart';
 import 'package:localsend_app/widget/opacity_slideshow.dart';
+import 'package:localsend_app/widget/responsive_builder.dart';
 import 'package:localsend_app/widget/responsive_list_view.dart';
 import 'package:localsend_app/widget/rotating_widget.dart';
 import 'package:refena_flutter/refena_flutter.dart';
 import 'package:routerino/routerino.dart';
 
 const _horizontalPadding = 15.0;
+final _options = FilePickerOption.getOptionsForPlatform();
 
-class SendTab extends StatefulWidget {
-  const SendTab({Key? key}) : super(key: key);
-
-  @override
-  State<SendTab> createState() => _SendTabState();
-}
-
-class _SendTabState extends State<SendTab> with Refena {
-  final options = FilePickerOption.getOptionsForPlatform();
-
-  @override
-  void initState() {
-    super.initState();
-
-    ensureRef((ref) async {
-      await ref.dispatchAsync(SendTabInitAction(context));
-    });
-  }
+class SendTab extends StatelessWidget {
+  const SendTab();
 
   @override
   Widget build(BuildContext context) {
-    final vm = ref.watch(sendTabVmProvider);
-
-    return ResponsiveListView(
-      padding: EdgeInsets.zero,
-      children: [
-        const SizedBox(height: 20),
-        if (vm.selectedFiles.isEmpty) ...[
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: _horizontalPadding),
-            child: Text(
-              t.sendTab.selection.title,
-              style: Theme.of(context).textTheme.titleMedium,
-            ),
-          ),
-          SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            child: Row(
-              children: [
-                const SizedBox(width: 10),
-                ...options.map((option) {
-                  return Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 5),
-                    child: BigButton(
-                      icon: option.icon,
-                      label: option.label,
-                      filled: false,
-                      onTap: () async => ref.dispatchAsync(PickAction(
-                        option: option,
-                        context: context,
-                      )),
-                    ),
+    return ViewModelBuilder(
+      provider: sendTabVmProvider,
+      init: (context) async => context.global.dispatchAsync(SendTabInitAction(context)), // ignore: discarded_futures
+      builder: (context, vm) {
+        final sizingInformation = SizingInformation(MediaQuery.sizeOf(context).width);
+        final buttonWidth = sizingInformation.isDesktop ? BigButton.desktopWidth : BigButton.mobileWidth;
+        final ref = context.ref;
+        return ResponsiveListView(
+          padding: EdgeInsets.zero,
+          children: [
+            const SizedBox(height: 20),
+            if (vm.selectedFiles.isEmpty) ...[
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: _horizontalPadding),
+                child: Text(
+                  t.sendTab.selection.title,
+                  style: Theme.of(context).textTheme.titleMedium,
+                ),
+              ),
+              HorizontalClipListView(
+                outerHorizontalPadding: 15,
+                outerVerticalPadding: 10,
+                childPadding: 10,
+                minChildWidth: buttonWidth,
+                children: _options.map((option) {
+                  return BigButton(
+                    icon: option.icon,
+                    label: option.label,
+                    filled: false,
+                    onTap: () async => ref.global.dispatchAsync(PickFileAction(
+                      option: option,
+                      context: context,
+                    )),
                   );
-                }),
-                const SizedBox(width: 10),
-              ],
-            ),
-          ),
-        ] else ...[
-          Card(
-            margin: const EdgeInsets.only(bottom: 10, left: _horizontalPadding, right: _horizontalPadding),
-            child: Padding(
-              padding: const EdgeInsets.all(15),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    t.sendTab.selection.title,
-                    style: Theme.of(context).textTheme.titleMedium,
-                  ),
-                  const SizedBox(height: 5),
-                  Text(t.sendTab.selection.files(files: vm.selectedFiles.length)),
-                  Text(t.sendTab.selection.size(size: vm.selectedFiles.fold(0, (prev, curr) => prev + curr.size).asReadableFileSize)),
-                  const SizedBox(height: 10),
-                  SingleChildScrollView(
-                    scrollDirection: Axis.horizontal,
-                    child: Row(
-                      children: [
-                        ...vm.selectedFiles.map((file) {
-                          return [
-                            CrossFileThumbnail(file),
-                            const SizedBox(width: 10),
-                          ];
-                        }).expand((e) => e),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(height: 10),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.end,
+                }).toList(),
+              ),
+            ] else ...[
+              Card(
+                margin: const EdgeInsets.only(bottom: 10, left: _horizontalPadding, right: _horizontalPadding),
+                child: Padding(
+                  padding: const EdgeInsetsDirectional.only(start: 15, top: 5, bottom: 15),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      TextButton(
-                        style: TextButton.styleFrom(
-                          foregroundColor: Theme.of(context).colorScheme.onSurface,
-                        ),
-                        onPressed: () async {
-                          await context.push(() => const SelectedFilesPage());
-                        },
-                        child: Text(t.general.edit),
+                      Row(
+                        children: [
+                          Text(
+                            t.sendTab.selection.title,
+                            style: Theme.of(context).textTheme.titleMedium,
+                          ),
+                          const Spacer(),
+                          CustomIconButton(
+                            onPressed: () => ref.redux(selectedSendingFilesProvider).dispatch(ClearSelectionAction()),
+                            child: Icon(Icons.close, color: Theme.of(context).colorScheme.secondary),
+                          ),
+                          const SizedBox(width: 5),
+                        ],
                       ),
-                      const SizedBox(width: 15),
-                      ElevatedButton.icon(
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: Theme.of(context).colorScheme.primary,
-                          foregroundColor: Theme.of(context).colorScheme.onPrimary,
+                      const SizedBox(height: 5),
+                      Text(t.sendTab.selection.files(files: vm.selectedFiles.length)),
+                      Text(t.sendTab.selection.size(size: vm.selectedFiles.fold(0, (prev, curr) => prev + curr.size).asReadableFileSize)),
+                      const SizedBox(height: 10),
+                      SizedBox(
+                        height: defaultThumbnailSize,
+                        child: ListView.builder(
+                          scrollDirection: Axis.horizontal,
+                          itemCount: vm.selectedFiles.length,
+                          itemBuilder: (context, index) {
+                            final file = vm.selectedFiles[index];
+                            return Padding(
+                              padding: const EdgeInsets.only(right: 10),
+                              child: SmartFileThumbnail.fromCrossFile(file),
+                            );
+                          },
                         ),
-                        onPressed: () async {
-                          if (options.length == 1) {
-                            // open directly
-                            await ref.dispatchAsync(PickAction(
-                              option: options.first,
-                              context: context,
-                            ));
-                            return;
-                          }
-                          await AddFileDialog.open(
-                            context: context,
-                            options: options,
-                          );
-                        },
-                        icon: const Icon(Icons.add),
-                        label: Text(t.general.add),
+                      ),
+                      const SizedBox(height: 10),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.end,
+                        children: [
+                          TextButton(
+                            style: TextButton.styleFrom(
+                              foregroundColor: Theme.of(context).colorScheme.onSurface,
+                            ),
+                            onPressed: () async {
+                              await context.push(() => const SelectedFilesPage());
+                            },
+                            child: Text(t.general.edit),
+                          ),
+                          const SizedBox(width: 15),
+                          ElevatedButton.icon(
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: Theme.of(context).colorScheme.primary,
+                              foregroundColor: Theme.of(context).colorScheme.onPrimary,
+                            ),
+                            onPressed: () async {
+                              if (_options.length == 1) {
+                                // open directly
+                                await ref.global.dispatchAsync(PickFileAction(
+                                  option: _options.first,
+                                  context: context,
+                                ));
+                                return;
+                              }
+                              await AddFileDialog.open(
+                                context: context,
+                                options: _options,
+                              );
+                            },
+                            icon: const Icon(Icons.add),
+                            label: Text(t.general.add),
+                          ),
+                          const SizedBox(width: 15),
+                        ],
                       ),
                     ],
                   ),
-                ],
+                ),
               ),
+            ],
+            Row(
+              children: [
+                const SizedBox(width: _horizontalPadding),
+                Flexible(
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 10),
+                    child: Text(t.sendTab.nearbyDevices, style: Theme.of(context).textTheme.titleMedium),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                _ScanButton(
+                  ips: vm.localIps,
+                ),
+                Tooltip(
+                  message: t.sendTab.manualSending,
+                  child: CustomIconButton(
+                    onPressed: () async => vm.onTapAddress(context),
+                    child: const Icon(Icons.ads_click),
+                  ),
+                ),
+                Tooltip(
+                  message: t.dialogs.favoriteDialog.title,
+                  child: CustomIconButton(
+                    onPressed: () async => await vm.onTapFavorite(context),
+                    child: const Icon(Icons.favorite),
+                  ),
+                ),
+                _SendModeButton(
+                  onSelect: (mode) async => vm.onTapSendMode(context, mode),
+                ),
+              ],
             ),
-          ),
-        ],
-        Row(
-          children: [
-            const SizedBox(width: _horizontalPadding),
-            Flexible(
-              child: Padding(
-                padding: const EdgeInsets.symmetric(vertical: 10),
-                child: Text(t.sendTab.nearbyDevices, style: Theme.of(context).textTheme.titleMedium),
+            if (vm.nearbyDevices.isEmpty)
+              const Padding(
+                padding: EdgeInsets.only(bottom: 10, left: _horizontalPadding, right: _horizontalPadding),
+                child: Opacity(
+                  opacity: 0.3,
+                  child: DevicePlaceholderListTile(),
+                ),
               ),
-            ),
-            const SizedBox(width: 10),
-            _ScanButton(
-              ips: vm.localIps,
-            ),
-            Tooltip(
-              message: t.dialogs.addressInput.title,
-              child: CustomIconButton(
-                onPressed: () async => vm.onTapAddress(context),
-                child: const Icon(Icons.ads_click),
-              ),
-            ),
-            Tooltip(
-              message: t.dialogs.favoriteDialog.title,
-              child: CustomIconButton(
-                onPressed: () async => await vm.onTapFavorite(context),
-                child: const Icon(Icons.favorite),
-              ),
-            ),
-            _SendModeButton(
-              onSelect: (mode) async => vm.onTapSendMode(context, mode),
-            ),
-          ],
-        ),
-        if (vm.nearbyDevices.isEmpty)
-          const Padding(
-            padding: EdgeInsets.only(bottom: 10, left: _horizontalPadding, right: _horizontalPadding),
-            child: Opacity(
-              opacity: 0.3,
-              child: DevicePlaceholderListTile(),
-            ),
-          ),
-        ...vm.nearbyDevices.map((device) {
-          final isFavorite = vm.favoriteDevices.any((e) => e.fingerprint == device.fingerprint);
-          return Padding(
-            padding: const EdgeInsets.only(bottom: 10, left: _horizontalPadding, right: _horizontalPadding),
-            child: Hero(
-              tag: 'device-${device.ip}',
-              child: vm.sendMode == SendMode.multiple
-                  ? _MultiSendDeviceListTile(
-                      device: device,
-                      isFavorite: isFavorite,
-                      vm: vm,
-                    )
-                  : DeviceListTile(
-                      device: device,
-                      isFavorite: isFavorite,
-                      onFavoriteTap: () async => await vm.onToggleFavorite(device),
-                      onTap: () async => await vm.onTapDevice(context, device),
-                    ),
-            ),
-          );
-        }),
-        const SizedBox(height: 10),
-        Center(
-          child: TextButton(
-            onPressed: () async {
-              await context.push(() => const TroubleshootPage());
-            },
-            child: Text(t.troubleshootPage.title),
-          ),
-        ),
-        const SizedBox(height: 20),
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: _horizontalPadding),
-          child: Consumer(
-            builder: (context, ref) {
-              final animations = ref.watch(animationProvider);
-              return OpacitySlideshow(
-                durationMillis: 6000,
-                running: animations,
-                children: [
-                  Text(t.sendTab.help, style: const TextStyle(color: Colors.grey), textAlign: TextAlign.center),
-                  if (checkPlatformCanReceiveShareIntent())
-                    Text(t.sendTab.shareIntentInfo, style: const TextStyle(color: Colors.grey), textAlign: TextAlign.center),
-                ],
+            ...vm.nearbyDevices.map((device) {
+              final favoriteEntry = vm.favoriteDevices.findDevice(device);
+              return Padding(
+                padding: const EdgeInsets.only(bottom: 10, left: _horizontalPadding, right: _horizontalPadding),
+                child: Hero(
+                  tag: 'device-${device.ip}',
+                  child: vm.sendMode == SendMode.multiple
+                      ? _MultiSendDeviceListTile(
+                          device: device,
+                          isFavorite: favoriteEntry != null,
+                          nameOverride: favoriteEntry?.alias,
+                          vm: vm,
+                        )
+                      : DeviceListTile(
+                          device: device,
+                          isFavorite: favoriteEntry != null,
+                          nameOverride: favoriteEntry?.alias,
+                          onFavoriteTap: () async => await vm.onToggleFavorite(context, device),
+                          onTap: () async => await vm.onTapDevice(context, device),
+                        ),
+                ),
               );
-            },
-          ),
-        ),
-        const SizedBox(height: 50),
-      ],
+            }),
+            const SizedBox(height: 10),
+            Center(
+              child: TextButton(
+                onPressed: () async {
+                  await context.push(() => const TroubleshootPage());
+                },
+                child: Text(t.troubleshootPage.title),
+              ),
+            ),
+            const SizedBox(height: 20),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: _horizontalPadding),
+              child: Consumer(
+                builder: (context, ref) {
+                  final animations = ref.watch(animationProvider);
+                  return OpacitySlideshow(
+                    durationMillis: 6000,
+                    running: animations,
+                    children: [
+                      Text(t.sendTab.help, style: const TextStyle(color: Colors.grey), textAlign: TextAlign.center),
+                      if (checkPlatformCanReceiveShareIntent())
+                        Text(t.sendTab.shareIntentInfo, style: const TextStyle(color: Colors.grey), textAlign: TextAlign.center),
+                    ],
+                  );
+                },
+              ),
+            ),
+            const SizedBox(height: 50),
+          ],
+        );
+      },
     );
   }
 }
@@ -305,23 +309,26 @@ class _ScanButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final scanningIps = context.ref.watch(nearbyDevicesProvider.select((s) => s.runningIps));
+    final (scanningFavorites, scanningIps) = context.ref.watch(nearbyDevicesProvider.select((s) => (s.runningFavoriteScan, s.runningIps)));
     final animations = context.ref.watch(animationProvider);
 
-    final spinning = scanningIps.isNotEmpty && animations;
+    final spinning = (scanningFavorites || scanningIps.isNotEmpty) && animations;
     final iconColor = !animations && scanningIps.isNotEmpty ? Theme.of(context).colorScheme.warning : null;
 
-    if (ips.length <= ScanFacade.maxInterfaces) {
-      return RotatingWidget(
-        duration: const Duration(seconds: 2),
-        spinning: spinning,
-        reverse: true,
-        child: CustomIconButton(
-          onPressed: () async {
-            context.ref.notifier(nearbyDevicesProvider).clearFoundDevices();
-            await context.ref.read(scanProvider).startSmartScan(forceLegacy: true);
-          },
-          child: Icon(Icons.sync, color: iconColor),
+    if (ips.length <= StartSmartScan.maxInterfaces) {
+      return Tooltip(
+        message: t.sendTab.scan,
+        child: RotatingWidget(
+          duration: const Duration(seconds: 2),
+          spinning: spinning,
+          reverse: true,
+          child: CustomIconButton(
+            onPressed: () async {
+              context.redux(nearbyDevicesProvider).dispatch(ClearFoundDevicesAction());
+              await context.global.dispatchAsync(StartSmartScan(forceLegacy: true));
+            },
+            child: Icon(Icons.sync, color: iconColor),
+          ),
         ),
       );
     }
@@ -329,8 +336,8 @@ class _ScanButton extends StatelessWidget {
     return _CircularPopupButton(
       tooltip: t.sendTab.scan,
       onSelected: (ip) async {
-        context.ref.notifier(nearbyDevicesProvider).clearFoundDevices();
-        await context.ref.read(scanProvider).startLegacySubnetScan([ip]);
+        context.redux(nearbyDevicesProvider).dispatch(ClearFoundDevicesAction());
+        await context.global.dispatchAsync(StartLegacySubnetScan(subnets: [ip]));
       },
       itemBuilder: (_) {
         return [
@@ -474,7 +481,10 @@ class _SendModeButton extends StatelessWidget {
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const Icon(Icons.help),
+              const Directionality(
+                textDirection: TextDirection.ltr,
+                child: Icon(Icons.help),
+              ),
               const SizedBox(width: 10),
               Text(t.sendTab.sendModeHelp),
             ],
@@ -493,11 +503,13 @@ class _SendModeButton extends StatelessWidget {
 class _MultiSendDeviceListTile extends StatelessWidget {
   final Device device;
   final bool isFavorite;
+  final String? nameOverride;
   final SendTabVm vm;
 
   const _MultiSendDeviceListTile({
     required this.device,
     required this.isFavorite,
+    required this.nameOverride,
     required this.vm,
   });
 
@@ -521,7 +533,8 @@ class _MultiSendDeviceListTile extends StatelessWidget {
       info: session?.status.humanString,
       progress: progress,
       isFavorite: isFavorite,
-      onFavoriteTap: () async => await vm.onToggleFavorite(device),
+      nameOverride: nameOverride,
+      onFavoriteTap: () async => await vm.onToggleFavorite(context, device),
       onTap: () async => await vm.onTapDeviceMultiSend(context, device),
     );
   }
@@ -536,6 +549,8 @@ extension on SessionStatus {
         return t.sendPage.busy;
       case SessionStatus.declined:
         return t.sendPage.rejected;
+      case SessionStatus.tooManyAttempts:
+        return t.sendPage.tooManyAttempts;
       case SessionStatus.sending:
         return null;
       case SessionStatus.finished:

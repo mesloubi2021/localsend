@@ -1,33 +1,38 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:convert';
-import 'dart:io';
 
-import 'package:dio/dio.dart';
+import 'package:common/api_route_builder.dart';
+import 'package:common/isolate.dart';
+import 'package:common/model/device.dart';
+import 'package:common/model/dto/file_dto.dart';
+import 'package:common/model/dto/info_register_dto.dart';
+import 'package:common/model/dto/multicast_dto.dart';
+import 'package:common/model/dto/prepare_upload_request_dto.dart';
+import 'package:common/model/dto/prepare_upload_response_dto.dart';
+import 'package:common/model/file_status.dart';
+import 'package:common/model/file_type.dart';
+import 'package:common/model/session_status.dart';
+import 'package:common/util/sleep.dart';
+import 'package:flutter/material.dart';
 import 'package:localsend_app/model/cross_file.dart';
-import 'package:localsend_app/model/device.dart';
-import 'package:localsend_app/model/dto/file_dto.dart';
-import 'package:localsend_app/model/dto/info_register_dto.dart';
-import 'package:localsend_app/model/dto/multicast_dto.dart';
-import 'package:localsend_app/model/dto/prepare_upload_request_dto.dart';
-import 'package:localsend_app/model/dto/prepare_upload_response_dto.dart';
-import 'package:localsend_app/model/file_status.dart';
-import 'package:localsend_app/model/file_type.dart';
 import 'package:localsend_app/model/send_mode.dart';
-import 'package:localsend_app/model/session_status.dart';
 import 'package:localsend_app/model/state/send/send_session_state.dart';
 import 'package:localsend_app/model/state/send/sending_file.dart';
 import 'package:localsend_app/pages/home_page.dart';
 import 'package:localsend_app/pages/progress_page.dart';
 import 'package:localsend_app/pages/send_page.dart';
 import 'package:localsend_app/provider/device_info_provider.dart';
-import 'package:localsend_app/provider/dio_provider.dart';
+import 'package:localsend_app/provider/http_provider.dart';
 import 'package:localsend_app/provider/progress_provider.dart';
 import 'package:localsend_app/provider/selection/selected_sending_files_provider.dart';
 import 'package:localsend_app/provider/settings_provider.dart';
-import 'package:localsend_app/util/api_route_builder.dart';
+import 'package:localsend_app/widget/dialogs/pin_dialog.dart';
 import 'package:logging/logging.dart';
 import 'package:refena_flutter/refena_flutter.dart';
+import 'package:rhttp/rhttp.dart';
 import 'package:routerino/routerino.dart';
+import 'package:uri_content/uri_content.dart';
 import 'package:uuid/uuid.dart';
 
 const _uuid = Uuid();
@@ -57,8 +62,7 @@ class SendNotifier extends Notifier<Map<String, SendSessionState>> {
     required List<CrossFile> files,
     required bool background,
   }) async {
-    final requestDio = ref.read(dioProvider).longLiving;
-    final uploadDio = ref.read(dioProvider).longLiving;
+    final client = ref.read(httpProvider).longLiving;
     final cancelToken = CancelToken();
     final sessionId = _uuid.v4();
 
@@ -82,10 +86,17 @@ class SendNotifier extends Notifier<Map<String, SendSessionState>> {
               preview: files.length == 1 && files.first.fileType == FileType.text && files.first.bytes != null
                   ? utf8.decode(files.first.bytes!) // send simple message by embedding it into the preview
                   : null,
+              metadata: file.lastModified != null || file.lastAccessed != null
+                  ? FileMetadata(
+                      lastModified: file.lastModified,
+                      lastAccessed: file.lastAccessed,
+                    )
+                  : null,
               legacy: target.version == '1.0',
             ),
             status: FileStatus.queue,
             token: null,
+            thumbnail: file.thumbnail,
             asset: file.asset,
             path: file.path,
             bytes: file.bytes,
@@ -95,7 +106,7 @@ class SendNotifier extends Notifier<Map<String, SendSessionState>> {
       }))),
       startTime: null,
       endTime: null,
-      cancelToken: cancelToken,
+      sendingTasks: [],
       errorMessage: null,
     );
 
@@ -129,29 +140,84 @@ class SendNotifier extends Notifier<Map<String, SendSessionState>> {
       );
     }
 
-    final Response response;
-    try {
-      response = await requestDio.post(
-        ApiRoute.prepareUpload.target(target),
-        data: jsonEncode(requestDto), // jsonEncode for better logging
-        cancelToken: cancelToken,
-      );
-    } catch (e) {
-      if (e is DioException && e.response?.statusCode == 403) {
-        state = state.updateSession(
-          sessionId: sessionId,
-          state: (s) => s?.copyWith(
-            status: SessionStatus.declined,
-          ),
+    HttpTextResponse? response;
+    bool invalidPin;
+    bool pinFirstAttempt = true;
+    String? pin;
+    do {
+      invalidPin = false;
+      try {
+        response = await client.post(
+          ApiRoute.prepareUpload.target(target),
+          query: {
+            if (pin != null) 'pin': pin,
+          },
+          body: HttpBody.json(requestDto.toJson()),
+          cancelToken: cancelToken,
         );
-      } else if (e is DioException && e.response?.statusCode == 409) {
-        state = state.updateSession(
-          sessionId: sessionId,
-          state: (s) => s?.copyWith(
-            status: SessionStatus.recipientBusy,
-          ),
-        );
-      } else {
+      } on RhttpStatusCodeException catch (e) {
+        switch (e.statusCode) {
+          case 401:
+            invalidPin = true;
+
+            // wait until animation is finished
+            await sleepAsync(500);
+
+            pin = await showDialog<String>(
+              context: Routerino.context, // ignore: use_build_context_synchronously
+              builder: (_) => PinDialog(
+                obscureText: true,
+                showInvalidPin: !pinFirstAttempt,
+              ),
+            );
+
+            pinFirstAttempt = false;
+
+            if (pin == null) {
+              state = state.updateSession(
+                sessionId: sessionId,
+                state: (s) => s?.copyWith(
+                  status: SessionStatus.canceledBySender,
+                ),
+              );
+              return;
+            }
+            break;
+          case 403:
+            state = state.updateSession(
+              sessionId: sessionId,
+              state: (s) => s?.copyWith(
+                status: SessionStatus.declined,
+              ),
+            );
+            return;
+          case 409:
+            state = state.updateSession(
+              sessionId: sessionId,
+              state: (s) => s?.copyWith(
+                status: SessionStatus.recipientBusy,
+              ),
+            );
+            return;
+          case 429:
+            state = state.updateSession(
+              sessionId: sessionId,
+              state: (s) => s?.copyWith(
+                status: SessionStatus.tooManyAttempts,
+              ),
+            );
+            return;
+          default:
+            state = state.updateSession(
+              sessionId: sessionId,
+              state: (s) => s?.copyWith(
+                status: SessionStatus.finishedWithErrors,
+                errorMessage: e.humanErrorMessage,
+              ),
+            );
+            return;
+        }
+      } catch (e) {
         state = state.updateSession(
           sessionId: sessionId,
           state: (s) => s?.copyWith(
@@ -159,13 +225,17 @@ class SendNotifier extends Notifier<Map<String, SendSessionState>> {
             errorMessage: e.humanErrorMessage,
           ),
         );
+        return;
       }
+    } while (invalidPin);
+
+    if (response == null) {
       return;
     }
 
     final Map<String, String> fileMap;
     if (target.version == '1.0') {
-      fileMap = (response.data as Map).cast<String, String>();
+      fileMap = (response.bodyToJson as Map).cast<String, String>();
     } else {
       if (response.statusCode == 204) {
         // Nothing selected
@@ -173,7 +243,7 @@ class SendNotifier extends Notifier<Map<String, SendSessionState>> {
         fileMap = {};
       } else {
         try {
-          final responseDto = PrepareUploadResponseDto.fromJson(response.data);
+          final responseDto = PrepareUploadResponseDto.fromJson(response.bodyToJson);
           fileMap = responseDto.files;
           state = state.updateSession(
             sessionId: sessionId,
@@ -241,90 +311,55 @@ class SendNotifier extends Notifier<Map<String, SendSessionState>> {
       ),
     );
 
-    await _send(sessionId, uploadDio, target, sendingFiles);
+    await _sendLoop(ref, sessionId, target, sendingFiles);
   }
 
-  Future<void> _send(String sessionId, Dio dio, Device target, Map<String, SendingFile> files) async {
-    bool hasError = false;
-    final remoteSessionId = state[sessionId]!.remoteSessionId;
-
+  Future<void> _sendLoop(Ref ref, String sessionId, Device target, Map<String, SendingFile> files) async {
     state = state.updateSession(
       sessionId: sessionId,
       state: (s) => s?.copyWith(startTime: DateTime.now().millisecondsSinceEpoch),
     );
 
-    for (final file in files.values) {
-      final token = file.token;
-      if (token == null) {
-        continue;
-      }
+    final queue = Queue<SendingFile>()..addAll(files.values);
+    final concurrency = ref.read(parentIsolateProvider).uploadIsolateCount;
+    _logger.info('Sending files using $concurrency concurrent isolates');
 
-      if (state[sessionId] != null && state[sessionId]!.status != SessionStatus.sending) {
-        break;
-      }
+    final futures = List.generate(concurrency, (index) async {
+      while (true) {
+        final file = switch (queue.isEmpty) {
+          true => null,
+          false => queue.removeFirst(),
+        };
 
-      _logger.info('Sending ${file.file.fileName}');
-      state = state.updateSession(
-        sessionId: sessionId,
-        state: (s) => s?.withFileStatus(file.file.id, FileStatus.sending, null),
-      );
+        if (file == null) {
+          break;
+        }
 
-      String? fileError;
-      try {
-        final cancelToken = CancelToken();
-        state = state.updateSession(
+        await sendFile(
           sessionId: sessionId,
-          state: (s) => s?.copyWith(cancelToken: cancelToken),
+          isolateIndex: index,
+          file: file,
+          isRetry: false,
         );
-        final stopwatch = Stopwatch()..start();
-        await dio.post(
-          ApiRoute.upload.target(target, query: {
-            if (remoteSessionId != null) 'sessionId': remoteSessionId,
-            'fileId': file.file.id,
-            'token': token,
-          }),
-          options: Options(
-            headers: {
-              'Content-Length': file.file.size,
-              'Content-Type': file.file.lookupMime(),
-            },
-          ),
-          data: file.path != null ? File(file.path!).openRead() : Stream.fromIterable([file.bytes!]),
-          onSendProgress: (curr, total) {
-            if (stopwatch.elapsedMilliseconds >= 100) {
-              stopwatch.reset();
-              ref.notifier(progressProvider).setProgress(
-                    sessionId: sessionId,
-                    fileId: file.file.id,
-                    progress: curr / total,
-                  );
-            }
-          },
-          cancelToken: cancelToken,
-        );
-
-        // set progress to 100% when successfully finished
-        ref.notifier(progressProvider).setProgress(
-              sessionId: sessionId,
-              fileId: file.file.id,
-              progress: 1,
-            );
-      } catch (e, st) {
-        fileError = e.humanErrorMessage;
-        hasError = true;
-        _logger.warning('Error while sending file ${file.file.fileName}', e, st);
       }
+    });
 
-      state = state.updateSession(
-        sessionId: sessionId,
-        state: (s) => s?.withFileStatus(file.file.id, fileError != null ? FileStatus.failed : FileStatus.finished, fileError),
-      );
+    await Future.wait(futures);
+
+    _finish(sessionId: sessionId);
+  }
+
+  void _finish({required String sessionId}) {
+    final sessionState = state[sessionId];
+    if (sessionState == null) {
+      return;
     }
 
-    if (state[sessionId] != null && state[sessionId]!.status != SessionStatus.sending) {
+    if (state[sessionId]!.status != SessionStatus.sending) {
       _logger.info('Transfer was canceled.');
     } else {
-      if (!hasError && state[sessionId]?.background == true) {
+      final hasError = sessionState.files.values.any((file) => file.status == FileStatus.failed);
+      if (!hasError && sessionState.background == true) {
         // close session because everything is fine and it is in background
         closeSession(sessionId);
         _logger.info('Transfer finished and session removed.');
@@ -347,6 +382,120 @@ class SendNotifier extends Notifier<Map<String, SendSessionState>> {
     }
   }
 
+  final uriContent = UriContent();
+
+  /// Sends a file.
+  /// Returns true, if the next file should be sent.
+  Future<bool> sendFile({
+    required String sessionId,
+    required int isolateIndex,
+    required SendingFile file,
+    required bool isRetry,
+  }) async {
+    final token = file.token;
+    if (token == null) {
+      return true;
+    }
+
+    final status = state[sessionId]?.status;
+    const allowedStates = {SessionStatus.sending, SessionStatus.finishedWithErrors};
+    if (status == null || !allowedStates.contains(status)) {
+      return false;
+    }
+
+    final remoteSessionId = state[sessionId]!.remoteSessionId;
+    final target = state[sessionId]!.target;
+
+    if (isRetry) {
+      _logger.info('Retrying ${file.file.fileName}');
+
+      state = state.updateSession(
+        sessionId: sessionId,
+        state: (s) => s?.copyWith(
+          status: SessionStatus.sending,
+          files: s.files.map((key, value) {
+            if (key == file.file.id) {
+              return MapEntry(key, value.copyWith(status: FileStatus.queue, errorMessage: null));
+            }
+            return MapEntry(key, value);
+          }),
+        ),
+      );
+    } else {
+      _logger.info('Sending ${file.file.fileName}');
+    }
+
+    state = state.updateSession(
+      sessionId: sessionId,
+      state: (s) => s?.withFileStatus(file.file.id, FileStatus.sending, null),
+    );
+
+    final taskResult = ref.redux(parentIsolateProvider).dispatchTakeResult(IsolateHttpUploadAction(
+          isolateIndex: isolateIndex,
+          remoteSessionId: remoteSessionId,
+          remoteFileToken: token,
+          fileId: file.file.id,
+          filePath: file.path,
+          fileBytes: file.bytes,
+          mime: file.file.lookupMime(),
+          fileSize: file.file.size,
+          device: target,
+        ));
+
+    String? fileError;
+    try {
+      state = state.updateSession(
+        sessionId: sessionId,
+        state: (s) => s?.copyWith(sendingTasks: [
+          ...?s.sendingTasks,
+          SendingTask(
+            isolateIndex: isolateIndex,
+            taskId: taskResult.taskId,
+          ),
+        ]),
+      );
+
+      await for (final progress in taskResult.progress) {
+        ref.notifier(progressProvider).setProgress(
+              sessionId: sessionId,
+              fileId: file.file.id,
+              progress: progress,
+            );
+      }
+
+      // set progress to 100% when successfully finished
+      ref.notifier(progressProvider).setProgress(
+            sessionId: sessionId,
+            fileId: file.file.id,
+            progress: 1,
+          );
+    } catch (e, st) {
+      fileError = e.humanErrorMessage;
+      _logger.warning('Error while sending file ${file.file.fileName}', e, st);
+    } finally {
+      state = state.updateSession(
+        sessionId: sessionId,
+        state: (s) => s?.copyWith(
+            sendingTasks: s.sendingTasks?.where((task) => !(task.isolateIndex == isolateIndex && task.taskId == taskResult.taskId)).toList()),
+      );
+    }
+
+    state = state.updateSession(
+      sessionId: sessionId,
+      state: (s) => s?.withFileStatus(file.file.id, fileError != null ? FileStatus.failed : FileStatus.finished, fileError),
+    );
+
+    if (isRetry) {
+      final state = this.state[sessionId];
+      if (state != null && state.files.values.map((e) => e.status).isFinishedOrError) {
+        _finish(sessionId: sessionId);
+        return false;
+      }
+    }
+
+    return true;
+  }
+
   /// Closes the send-session and sends a cancel event to the receiver.
   void cancelSession(String sessionId) {
     final sessionState = state[sessionId];
@@ -354,12 +503,13 @@ class SendNotifier extends Notifier<Map<String, SendSessionState>> {
       return;
     }
     final remoteSessionId = sessionState.remoteSessionId;
-    sessionState.cancelToken?.cancel(); // cancel current request
+
+    _cancelRunningRequests(sessionState);
 
     // notify the receiver
     try {
       ref
-          .read(dioProvider)
+          .read(httpProvider)
           .discovery
           // ignore: discarded_futures
           .post(ApiRoute.cancel.target(sessionState.target, query: remoteSessionId != null ? {'sessionId': remoteSessionId} : null));
@@ -376,7 +526,7 @@ class SendNotifier extends Notifier<Map<String, SendSessionState>> {
     if (sessionState == null) {
       return;
     }
-    sessionState.cancelToken?.cancel(); // cancel current request
+    _cancelRunningRequests(sessionState);
 
     state = state.updateSession(
       sessionId: sessionId,
@@ -385,6 +535,15 @@ class SendNotifier extends Notifier<Map<String, SendSessionState>> {
         endTime: DateTime.now().millisecondsSinceEpoch,
       ),
     );
+  }
+
+  void _cancelRunningRequests(SendSessionState state) {
+    for (final task in state.sendingTasks ?? <SendingTask>[]) {
+      ref.redux(parentIsolateProvider).dispatch(IsolateHttpUploadCancelAction(
+            isolateIndex: task.isolateIndex,
+            taskId: task.taskId,
+          ));
+    }
   }
 
   /// Closes the session
@@ -449,17 +608,27 @@ extension on SendSessionState {
 extension on Object {
   String get humanErrorMessage {
     final e = this;
-    if (e is DioException && e.response != null) {
-      final body = e.response!.data;
-      String message;
-      try {
-        message = (body as Map)['message'];
-      } catch (_) {
-        message = body;
-      }
-      return '[${e.response!.statusCode}] $message';
+    final (statusCode, message) = switch (this) {
+      RhttpStatusCodeException(:final statusCode, :final body) => (statusCode, _parseErrorMessage(body)),
+      _ => (null, e.toString()),
+    };
+
+    if (statusCode != null && message != null) {
+      return '[$statusCode] $message';
     }
 
     return e.toString();
+  }
+}
+
+String? _parseErrorMessage(Object? body) {
+  if (body is! String) {
+    return null;
+  }
+
+  try {
+    return (jsonDecode(body) as Map)['message'];
+  } catch (_) {
+    return null;
   }
 }

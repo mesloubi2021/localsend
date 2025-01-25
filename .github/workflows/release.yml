@@ -4,7 +4,8 @@ on:
   workflow_dispatch:
 
 env:
-  FLUTTER_VERSION: "3.13.8"
+  FLUTTER_VERSION: "3.24.5"
+  RUST_VERSION: "1.83.0"
   APK_BUILD_DIR: "/tmp/build"
 
 jobs:
@@ -19,25 +20,8 @@ jobs:
       - name: Get version from pubspec.yaml
         id: get_version
         run: |
-          VERSION=$(sed -n 's/^version: \([0-9]*\.[0-9]*\.[0-9]*\).*/\1/p' pubspec.yaml)
+          VERSION=$(sed -n 's/^version: \([0-9]*\.[0-9]*\.[0-9]*\).*/\1/p' app/pubspec.yaml)
           echo "version=$VERSION" >> $GITHUB_OUTPUT
-
-      - uses: subosito/flutter-action@v2
-        with:
-          flutter-version: ${{ env.FLUTTER_VERSION }}
-          channel: "stable"
-
-      - name: Dependencies
-        run: flutter pub get
-
-      - name: Build generated files
-        run: flutter pub run build_runner build -d
-
-      - name: Upload updated lib files with generated code
-        uses: actions/upload-artifact@v3
-        with:
-          name: lib-files
-          path: ./lib/*
 
   build_apk:
     needs: build
@@ -47,11 +31,8 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Download generated files
-        uses: actions/download-artifact@v3
-        with:
-          name: lib-files
-          path: lib
+      - name: Remove proprietary dependencies
+        run: sh scripts/remove_proprietary_dependencies.sh
 
       - name: Copy files to env.APK_BUILD_DIR
         run: |
@@ -62,7 +43,7 @@ jobs:
         working-directory: ${{ env.APK_BUILD_DIR }}
         env:
           ENCODED_STRING: ${{ secrets.ANDROID_KEY_PROPERTIES }}
-        run: echo $ENCODED_STRING | base64 -di > android/key.properties
+        run: echo $ENCODED_STRING | base64 -di > app/android/key.properties
 
       - name: Decode android-keystore.jks file
         working-directory: ${{ env.APK_BUILD_DIR }}
@@ -70,43 +51,46 @@ jobs:
           ENCODED_STRING: ${{ secrets.ANDROID_KEY_STORE }}
         run: mkdir secrets && echo $ENCODED_STRING | base64 -di > secrets/android-keystore.jks
 
-      - name: Set up JDK 11
-        uses: actions/setup-java@v3
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
-          java-version: '11'
+          java-version: '17'
 
       - name: Install Flutter
         uses: subosito/flutter-action@v2
         with:
           flutter-version: ${{ env.FLUTTER_VERSION }}
 
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: ${{ env.RUST_VERSION }}
+
       - name: Dependencies
-        working-directory: ${{ env.APK_BUILD_DIR }}
+        working-directory: ${{ env.APK_BUILD_DIR }}/app
         run: flutter pub get
 
       - name: Build APK
-        working-directory: ${{ env.APK_BUILD_DIR }}
-        run: flutter build apk
+        working-directory: ${{ env.APK_BUILD_DIR }}/app
+        run: flutter build apk --split-per-abi
 
       - name: Upload APK
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: apk-result
-          path: ${{ env.APK_BUILD_DIR }}/build/app/outputs/flutter-apk/app-release.apk
+          path: |
+            ${{ env.APK_BUILD_DIR }}/app/build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk
+            ${{ env.APK_BUILD_DIR }}/app/build/app/outputs/flutter-apk/app-arm64-v8a-release.apk
+            ${{ env.APK_BUILD_DIR }}/app/build/app/outputs/flutter-apk/app-x86_64-release.apk
 
-  build_tar:
+  build_tar_x86_64:
     needs: build
     runs-on: ubuntu-20.04
 
     steps:
       - uses: actions/checkout@v4
-
-      - name: Download generated files
-        uses: actions/download-artifact@v3
-        with:
-          name: lib-files
-          path: lib
 
       - name: Install dependencies
         run: |
@@ -119,34 +103,63 @@ jobs:
           channel: "stable"
 
       - name: Dependencies
+        working-directory: app
         run: flutter pub get
 
       - name: Compile linux
+        working-directory: app
         run: flutter build linux
 
       - name: Create tar.gz archive
         run: |
-          cd build/linux/x64/release/bundle
+          cd app/build/linux/x64/release/bundle
           tar -czvf ../../../../../result.tar.gz *
 
       - name: Upload tar.gz archive
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
-          name: tar-gz-result
-          path: ./*.tar.gz
+          name: tar-gz-x86-64-result
+          path: ./app/*.tar.gz
 
-  build_deb:
+  # Manage the Flutter version on the self-hosted runner manually!
+  # Flutter currently doesn't provide Linux ARM64 binaries.
+  build_tar_arm_64:
+    needs: build
+    runs-on: [ self-hosted, linux, arm64 ]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake libgtk-3-dev ninja-build libayatana-appindicator3-dev
+
+      - name: Dependencies
+        working-directory: app
+        run: flutter pub get
+
+      - name: Compile linux
+        working-directory: app
+        run: flutter build linux
+
+      - name: Create tar.gz archive
+        run: |
+          cd app/build/linux/arm64/release/bundle
+          tar -czvf ../../../../../result.tar.gz *
+
+      - name: Upload tar.gz archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: tar-gz-arm-64-result
+          path: ./app/*.tar.gz
+
+  build_deb_x86_64:
     needs: build
     runs-on: ubuntu-20.04
 
     steps:
       - uses: actions/checkout@v4
-
-      - name: Download generated files
-        uses: actions/download-artifact@v3
-        with:
-          name: lib-files
-          path: lib
 
       - name: Install dependencies
         run: |
@@ -165,13 +178,14 @@ jobs:
         run: echo 'export PATH="$PATH:$HOME/.pub-cache/bin"' >> ~/.bashrc
 
       - name: Build deb package
+        working-directory: app
         run: flutter_distributor package --platform linux --targets deb
 
       - name: Find deb file
         id: find_deb
         run: |
           VERSION=${{ needs.build.outputs.version }}
-          DEB_PATH=$(find dist -name "localsend_app-$VERSION*-linux.deb")
+          DEB_PATH=$(find app/dist -name "localsend_app-$VERSION*-linux.deb")
           echo "deb_path=$DEB_PATH" >> $GITHUB_OUTPUT
 
       - name: Check if deb file exists
@@ -183,23 +197,59 @@ jobs:
           fi
 
       - name: Upload deb file
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
-          name: deb-result
+          name: deb-x86-64-result
           path: ${{ steps.find_deb.outputs.deb_path }}
 
-  build_appimage:
+  # Manage the Flutter version on the self-hosted runner manually!
+  # Flutter currently doesn't provide Linux ARM64 binaries.
+  build_deb_arm_64:
+    needs: build
+    runs-on: [ self-hosted, linux, arm64 ]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake libgtk-3-dev ninja-build libayatana-appindicator3-dev
+
+      - name: Enable dart_distributor
+        run: dart pub global activate flutter_distributor
+
+      - name: Build deb package
+        working-directory: app
+        run: PATH="$PATH:$HOME/.pub-cache/bin" flutter_distributor package --platform linux --targets deb
+
+      - name: Find deb file
+        id: find_deb
+        run: |
+          VERSION=${{ needs.build.outputs.version }}
+          DEB_PATH=$(find app/dist -name "localsend_app-$VERSION*-linux.deb")
+          echo "deb_path=$DEB_PATH" >> $GITHUB_OUTPUT
+
+      - name: Check if deb file exists
+        id: check_file
+        run: |
+          if [[ ! -f "${{ steps.find_deb.outputs.deb_path }}" ]]; then
+            echo "File not found: ${{ steps.find_deb.outputs.deb_path }}"
+            exit 1
+          fi
+
+      - name: Upload deb file
+        uses: actions/upload-artifact@v4
+        with:
+          name: deb-arm-64-result
+          path: ${{ steps.find_deb.outputs.deb_path }}
+
+  build_appimage_x86_64:
     needs: build
     runs-on: ubuntu-20.04
 
     steps:
       - uses: actions/checkout@v4
-
-      - name: Download generated files
-        uses: actions/download-artifact@v3
-        with:
-          name: lib-files
-          path: lib
 
       - name: Install dependencies
         run: |
@@ -212,24 +262,29 @@ jobs:
           channel: "stable"
 
       - name: Dependencies
+        working-directory: app
         run: flutter pub get
 
       - name: Compile linux
+        working-directory: app
         run: flutter build linux
 
       - name: Copy compiled linux files
         run: |
           mkdir AppDir
-          cp -r build/linux/x64/release/bundle/* AppDir/
+          cp -r app/build/linux/x64/release/bundle/* AppDir/
 
       - name: Copy logo to AppDir
         run: |
           mkdir -p AppDir/usr/share/icons/hicolor/32x32/apps
-          cp assets/img/logo-32.png AppDir/usr/share/icons/hicolor/32x32/apps/localsend.png
+          cp app/assets/img/logo-32.png AppDir/usr/share/icons/hicolor/32x32/apps/localsend.png
           mkdir -p AppDir/usr/share/icons/hicolor/128x128/apps
-          cp assets/img/logo-128.png AppDir/usr/share/icons/hicolor/128x128/apps/localsend.png
+          cp app/assets/img/logo-128.png AppDir/usr/share/icons/hicolor/128x128/apps/localsend.png
           mkdir -p AppDir/usr/share/icons/hicolor/256x256/apps
-          cp assets/img/logo-256.png AppDir/usr/share/icons/hicolor/256x256/apps/localsend.png
+          cp app/assets/img/logo-256.png AppDir/usr/share/icons/hicolor/256x256/apps/localsend.png
+
+      - name: Copy Recipe to correct location
+        run: cp scripts/appimage/AppImageBuilder_x86_64.yml AppImageBuilder.yml
 
       - name: Build AppImage
         uses: AppImageCrafters/build-appimage@57c3bc6963f870ce3be103117de5b5e33ffbaeb6
@@ -237,12 +292,12 @@ jobs:
           recipe: ./AppImageBuilder.yml
 
       - name: Upload AppImage file
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
-          name: appimage-result
+          name: appimage-x86-64-result
           path: ./*.AppImage
 
-  build_windows_zip:
+  build_windows_zip_x86_64:
     needs: build
     runs-on: windows-latest
 
@@ -250,13 +305,8 @@ jobs:
       - name: Fix long file paths
         run: git config --system core.longpaths true
 
-      - uses: actions/checkout@v4
-
-      - name: Download generated files
-        uses: actions/download-artifact@v3
-        with:
-          name: lib-files
-          path: lib
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
       - uses: subosito/flutter-action@v2
         with:
@@ -264,22 +314,44 @@ jobs:
           channel: "stable"
 
       - name: Dependencies
+        working-directory: app
         run: flutter pub get
 
       - name: Compile for Windows
+        working-directory: app
         run: flutter build windows
 
+      - name: Create empty settings.json
+        working-directory: app
+        run: echo {} > build/windows/x64/runner/Release/settings.json
+
+      - name: Add DLL files
+        working-directory: app
+        run: |
+          Copy-Item ../scripts/windows/x64/msvcp140.dll build/windows/x64/runner/Release/
+          Copy-Item ../scripts/windows/x64/vcruntime140.dll build/windows/x64/runner/Release/
+          Copy-Item ../scripts/windows/x64/vcruntime140_1.dll build/windows/x64/runner/Release/
+
       - name: Zip compiled files
-        run: Compress-Archive -Path build/windows/runner/Release/* -DestinationPath LocalSend.zip
+        working-directory: app
+        run: Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath LocalSend.zip
 
       - name: Upload zip
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
-          name: windows-zip-result
-          path: LocalSend.zip
+          name: windows-zip-x86-64-result
+          path: app/LocalSend.zip
 
   release:
-    needs: [build, build_apk, build_tar, build_deb, build_appimage, build_windows_zip]
+    needs:
+      - build
+      - build_apk
+      - build_tar_x86_64
+      - build_tar_arm_64
+      - build_deb_x86_64
+      - build_deb_arm_64
+      - build_appimage_x86_64
+      - build_windows_zip_x86_64
     runs-on: ubuntu-20.04
 
     steps:
@@ -287,7 +359,7 @@ jobs:
 
       - name: Draft release
         id: draft_release
-        uses: release-drafter/release-drafter@v5
+        uses: release-drafter/release-drafter@v6
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
@@ -296,36 +368,56 @@ jobs:
 
       # APK
       - name: Download apk file
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           name: apk-result
           path: apk-result
 
       - name: Copy apk file to root
-        run: cp apk-result/*.apk result.apk
+        run: cp apk-result/*.apk .
 
-      - name: Upload Release Asset
+      - name: Upload Release Asset (arm32v7)
         uses: actions/upload-release-asset@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ steps.draft_release.outputs.upload_url }}
-          asset_path: result.apk
-          asset_name: LocalSend-${{ needs.build.outputs.version }}.apk
+          asset_path: app-armeabi-v7a-release.apk
+          asset_name: LocalSend-${{ needs.build.outputs.version }}-android-arm32v7.apk
           asset_content_type: application/vnd.android.package-archive
 
-      # TAR.GZ
-      - name: Download tar.gz file
-        uses: actions/download-artifact@v3
+      - name: Upload Release Asset (arm64v8)
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          name: tar-gz-result
-          path: tar-gz-result
+          upload_url: ${{ steps.draft_release.outputs.upload_url }}
+          asset_path: app-arm64-v8a-release.apk
+          asset_name: LocalSend-${{ needs.build.outputs.version }}-android-arm64v8.apk
+          asset_content_type: application/vnd.android.package-archive
+
+      - name: Upload Release Asset (x64)
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.draft_release.outputs.upload_url }}
+          asset_path: app-x86_64-release.apk
+          asset_name: LocalSend-${{ needs.build.outputs.version }}-android-x64.apk
+          asset_content_type: application/vnd.android.package-archive
+
+      # TAR.GZ (x86_64)
+      - name: Download tar.gz file
+        uses: actions/download-artifact@v4
+        with:
+          name: tar-gz-x86-64-result
+          path: tar-gz-x86-64-result
 
       - name: List files in tar.gz-directory
-        run: ls -l tar-gz-result
+        run: ls -l tar-gz-x86-64-result
 
       - name: Copy tar.gz file to root
-        run: cp tar-gz-result/* result.tar.gz
+        run: cp tar-gz-x86-64-result/* result.tar.gz
 
       - name: Upload Release Asset (tar.gz)
         uses: actions/upload-release-asset@v1
@@ -337,15 +429,38 @@ jobs:
           asset_name: LocalSend-${{ needs.build.outputs.version }}-linux-x86-64.tar.gz
           asset_content_type: application/gzip
 
-      # DEB
-      - name: Download deb file
-        uses: actions/download-artifact@v3
+      # TAR.GZ (arm_64)
+      - name: Download tar.gz file
+        uses: actions/download-artifact@v4
         with:
-          name: deb-result
-          path: deb-result
+          name: tar-gz-arm-64-result
+          path: tar-gz-arm-64-result
+
+      - name: List files in tar.gz-directory
+        run: ls -l tar-gz-arm-64-result
+
+      - name: Copy tar.gz file to root
+        run: cp tar-gz-arm-64-result/* result.tar.gz
+
+      - name: Upload Release Asset (tar.gz)
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.draft_release.outputs.upload_url }}
+          asset_path: result.tar.gz
+          asset_name: LocalSend-${{ needs.build.outputs.version }}-linux-arm-64.tar.gz
+          asset_content_type: application/gzip
+
+      # DEB (x86_64)
+      - name: Download deb file
+        uses: actions/download-artifact@v4
+        with:
+          name: deb-x86-64-result
+          path: deb-x86-64-result
 
       - name: Copy deb file to root
-        run: cp deb-result/*.deb result.deb
+        run: cp deb-x86-64-result/*.deb result.deb
 
       - name: Upload Release Asset
         uses: actions/upload-release-asset@v1
@@ -357,19 +472,39 @@ jobs:
           asset_name: LocalSend-${{ needs.build.outputs.version }}-linux-x86-64.deb
           asset_content_type: application/vnd.debian.binary-package
 
-      # APPIMAGE
-      - name: Download AppImage file
-        uses: actions/download-artifact@v3
+      # DEB (arm_64)
+      - name: Download deb file
+        uses: actions/download-artifact@v4
         with:
-          name: appimage-result
-          path: appimage-result
+          name: deb-arm-64-result
+          path: deb-arm-64-result
+
+      - name: Copy deb file to root
+        run: cp deb-arm-64-result/*.deb result.deb
+
+      - name: Upload Release Asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.draft_release.outputs.upload_url }}
+          asset_path: result.deb
+          asset_name: LocalSend-${{ needs.build.outputs.version }}-linux-arm-64.deb
+          asset_content_type: application/vnd.debian.binary-package
+
+      # APPIMAGE (x86_64)
+      - name: Download AppImage file
+        uses: actions/download-artifact@v4
+        with:
+          name: appimage-x86-64-result
+          path: appimage-x86-64-result
 
       - name: List files in appimage-directory
-        run: ls -l appimage-result
+        run: ls -l appimage-x86-64-result
 
       - name: Copy AppImage file to root
         run: |
-          for file in appimage-result/*; do
+          for file in appimage-x86-64-result/*; do
             if [[ $file == *.AppImage && $file != *.AppImage.zsync ]]; then
               cp "$file" result.AppImage
             fi
@@ -385,15 +520,15 @@ jobs:
           asset_name: LocalSend-${{ needs.build.outputs.version }}-linux-x86-64.AppImage
           asset_content_type: application/x-appimage
 
-      # WINDOWS ZIP
+      # WINDOWS ZIP (x86_64)
       - name: Download windows zip file
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
-          name: windows-zip-result
-          path: windows-zip-result
+          name: windows-zip-x86-64-result
+          path: windows-zip-x86-64-result
 
       - name: Copy zip file to root
-        run: cp windows-zip-result/*.zip result.zip
+        run: cp windows-zip-x86-64-result/*.zip result.zip
 
       - name: Upload Release Asset
         uses: actions/upload-release-asset@v1

@@ -1,4 +1,5 @@
 import 'dart:io';
+
 import 'package:flutter/foundation.dart';
 import 'package:localsend_app/gen/assets.gen.dart';
 import 'package:localsend_app/gen/strings.g.dart';
@@ -6,7 +7,6 @@ import 'package:localsend_app/provider/animation_provider.dart';
 import 'package:localsend_app/util/native/platform_check.dart';
 import 'package:logging/logging.dart';
 import 'package:refena_flutter/refena_flutter.dart';
-import 'package:system_tray/system_tray.dart';
 import 'package:tray_manager/tray_manager.dart' as tm;
 import 'package:window_manager/window_manager.dart';
 
@@ -21,63 +21,44 @@ Future<void> initTray() async {
   if (!checkPlatformHasTray()) {
     return;
   }
-  if (!checkPlatform([TargetPlatform.linux])) {
-    try {
-      if (checkPlatform([TargetPlatform.windows])) {
-        await tm.trayManager.setIcon(
-          Assets.img.logo32Ico,
-        );
-      } else if (checkPlatform([TargetPlatform.macOS])) {
-        await tm.trayManager.setIcon(Assets.img.logo32Black.path, isTemplate: true);
+  try {
+    if (checkPlatform([TargetPlatform.windows])) {
+      await tm.trayManager.setIcon(Assets.img.logo);
+    } else if (checkPlatform([TargetPlatform.macOS])) {
+      // The menu bar icon will created in AppDelegate.swift
+      return;
+    } else if (checkPlatform([TargetPlatform.linux])) {
+      String icon;
+      if (await File('/.flatpak-info').exists()) {
+        // Icon for Flatpak, which must exist in /app/share/icons/hicolor/*x*/apps.
+        icon = 'org.localsend.localsend_app-tray';
       } else {
-        await tm.trayManager.setIcon(Assets.img.logo32Png.path);
+        icon = Assets.img.logo32White.path;
       }
-
-      final items = [
-        tm.MenuItem(
-          key: TrayEntry.open.name,
-          label: t.tray.open,
-        ),
-        tm.MenuItem(
-          key: TrayEntry.close.name,
-          label: t.tray.close,
-        ),
-      ];
-      await tm.trayManager.setContextMenu(tm.Menu(items: items));
-      await tm.trayManager.setToolTip(t.appName);
-    } catch (e) {
-      _logger.warning('Failed to init tray', e);
+      _logger.info('Using "$icon" as path of system tray icon');
+      await tm.trayManager.setIcon(icon);
+    } else {
+      await tm.trayManager.setIcon(Assets.img.logo32.path);
     }
-  } else {
-    // The Linux tray display is handled by systemTray instead
-    final SystemTray systemTray = SystemTray();
 
-    await systemTray.initSystemTray(
-      title: t.appName,
-      iconPath: Assets.img.logo32White.path,
-    );
-
-    final Menu menu = Menu();
-    await menu.buildFrom([
-      MenuItemLabel(
+    final items = [
+      tm.MenuItem(
+        key: TrayEntry.open.name,
         label: t.tray.open,
-        onClicked: (menuItem) async {
-          await windowManager.show();
-          await windowManager.focus();
-        },
       ),
-      MenuItemLabel(label: t.tray.close, onClicked: (menuItem) => exit(0)),
-    ]);
-
-    await systemTray.setContextMenu(menu);
-
-    systemTray.registerSystemTrayEventHandler((eventName) {
-      if (eventName == kSystemTrayEventClick) {
-        systemTray.popUpContextMenu();
-      } else if (eventName == kSystemTrayEventRightClick) {
-        WindowManager.instance.show();
-      }
-    });
+      tm.MenuItem(
+        key: TrayEntry.close.name,
+        label: defaultTargetPlatform == TargetPlatform.windows ? t.tray.closeWindows : t.tray.close,
+      ),
+    ];
+    await tm.trayManager.setContextMenu(tm.Menu(items: items));
+    // No Linux implementation for setToolTip available as of tray_manager 0.2.2
+    // https://pub.dev/packages/tray_manager#api
+    if (!checkPlatform([TargetPlatform.linux])) {
+      await tm.trayManager.setToolTip(t.appName);
+    }
+  } catch (e) {
+    _logger.warning('Failed to init tray', e);
   }
 }
 
@@ -104,4 +85,10 @@ Future<void> showFromTray() async {
 
   // Enable animations
   RefenaScope.defaultRef.notifier(sleepProvider).setState((_) => false);
+}
+
+Future<void> destroyTray() async {
+  if (!checkPlatform([TargetPlatform.linux])) {
+    await tm.trayManager.destroy();
+  }
 }

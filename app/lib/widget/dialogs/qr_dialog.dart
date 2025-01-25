@@ -1,19 +1,23 @@
 import 'package:flutter/material.dart';
+import 'package:localsend_app/config/theme.dart';
 import 'package:localsend_app/gen/strings.g.dart';
 import 'package:localsend_app/model/state/send/web/web_send_state.dart';
 import 'package:localsend_app/provider/network/server/server_provider.dart';
-import 'package:localsend_app/theme.dart';
 import 'package:pretty_qr_code/pretty_qr_code.dart';
 import 'package:refena_flutter/refena_flutter.dart';
 import 'package:routerino/routerino.dart';
 
 class QrDialog extends StatelessWidget {
   final String data;
+  final String? label;
   final bool listenIncomingWebSendRequests;
+  final String? pin;
 
   const QrDialog({
     required this.data,
+    this.label,
     this.listenIncomingWebSendRequests = false,
+    this.pin,
   });
 
   @override
@@ -32,15 +36,23 @@ class QrDialog extends StatelessWidget {
         children: [
           Padding(
             padding: const EdgeInsets.all(8.0),
-            child: PrettyQr(
-              size: 200,
-              errorCorrectLevel: QrErrorCorrectLevel.Q,
-              elementColor: Theme.of(context).colorScheme.onSurface,
-              data: data,
+            child: SizedBox(
+              width: 200,
+              height: 200,
+              child: PrettyQrView.data(
+                errorCorrectLevel: QrErrorCorrectLevel.Q,
+                data: data,
+                decoration: PrettyQrDecoration(
+                  shape: PrettyQrSmoothSymbol(
+                    roundFactor: 0,
+                    color: Theme.of(context).colorScheme.onSurface,
+                  ),
+                ),
+              ),
             ),
           ),
           const SizedBox(height: 10),
-          Text(data, textAlign: TextAlign.center),
+          Text(label ?? data, textAlign: TextAlign.center),
           if (listenIncomingWebSendRequests && webSendState != null)
             Builder(
               builder: (context) {
@@ -58,6 +70,18 @@ class QrDialog extends StatelessWidget {
                   return Container();
                 }
               },
+            ),
+          if (pin != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 10),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  const Icon(Icons.vpn_key),
+                  const SizedBox(width: 5),
+                  Text(pin!),
+                ],
+              ),
             ),
         ],
       ),

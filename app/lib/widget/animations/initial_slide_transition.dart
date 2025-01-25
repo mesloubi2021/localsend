@@ -1,5 +1,5 @@
+import 'package:common/util/sleep.dart';
 import 'package:flutter/material.dart';
-import 'package:localsend_app/util/sleep.dart';
 
 class InitialSlideTransition extends StatefulWidget {
   final Widget child;
@@ -16,8 +16,8 @@ class InitialSlideTransition extends StatefulWidget {
     this.curve = Curves.easeOutCubic,
     required this.duration,
     this.delay = Duration.zero,
-    Key? key,
-  }) : super(key: key);
+    super.key,
+  });
 
   @override
   State<InitialSlideTransition> createState() => _InitialSlideTransitionState();

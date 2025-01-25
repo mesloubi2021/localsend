@@ -1,5 +1,5 @@
+import 'package:common/util/sleep.dart';
 import 'package:flutter/material.dart';
-import 'package:localsend_app/util/sleep.dart';
 
 class InitialFadeTransition extends StatefulWidget {
   final Widget child;
@@ -10,8 +10,8 @@ class InitialFadeTransition extends StatefulWidget {
     required this.child,
     required this.duration,
     this.delay = Duration.zero,
-    Key? key,
-  }) : super(key: key);
+    super.key,
+  });
 
   @override
   State<InitialFadeTransition> createState() => _InitialFadeTransitionState();

@@ -1,7 +1,9 @@
 import 'dart:async';
 import 'dart:io';
 
-import 'package:localsend_app/constants.dart';
+import 'package:common/constants.dart';
+import 'package:common/isolate.dart';
+import 'package:common/model/dto/multicast_dto.dart';
 import 'package:localsend_app/model/cross_file.dart';
 import 'package:localsend_app/model/state/server/server_state.dart';
 import 'package:localsend_app/provider/network/server/controller/receive_controller.dart';
@@ -10,10 +12,9 @@ import 'package:localsend_app/provider/network/server/server_utils.dart';
 import 'package:localsend_app/provider/security_provider.dart';
 import 'package:localsend_app/provider/settings_provider.dart';
 import 'package:localsend_app/util/alias_generator.dart';
+import 'package:localsend_app/util/simple_server.dart';
 import 'package:logging/logging.dart';
 import 'package:refena_flutter/refena_flutter.dart';
-import 'package:shelf/shelf_io.dart';
-import 'package:shelf_router/shelf_router.dart';
 
 final _logger = Logger('Server');
 
@@ -21,11 +22,34 @@ final _logger = Logger('Server');
 /// It is a singleton provider, so only one server can be running at a time.
 /// The server state is null if the server is not running.
 /// The server can receive files (since v1) and send files (since v2).
-final serverProvider = NotifierProvider<ServerNotifier, ServerState?>((ref) {
-  return ServerNotifier();
+final serverProvider = NotifierProvider<ServerService, ServerState?>((ref) {
+  return ServerService();
+}, onChanged: (_, next, ref) {
+  final settings = ref.read(settingsProvider);
+  final syncState = ref.read(parentIsolateProvider).syncState;
+  final syncStatePrev = (syncState.alias, syncState.port, syncState.protocol, syncState.serverRunning, syncState.download);
+  final syncStateNext = (
+    next?.alias ?? settings.alias,
+    next?.port ?? settings.port,
+    (next?.https ?? settings.https) ? ProtocolType.https : ProtocolType.http,
+    next != null,
+    next?.webSendState != null,
+  );
+
+  if (syncStatePrev == syncStateNext) {
+    return;
+  }
+
+  ref.redux(parentIsolateProvider).dispatch(IsolateSyncServerStateAction(
+        alias: syncStateNext.$1,
+        port: syncStateNext.$2,
+        protocol: syncStateNext.$3,
+        serverRunning: syncStateNext.$4,
+        download: syncStateNext.$5,
+      ));
 });
 
-class ServerNotifier extends Notifier<ServerState?> {
+class ServerService extends Notifier<ServerState?> {
   late final _serverUtils = ServerUtils(
     refFunc: () => ref,
     getState: () => state!,
@@ -36,7 +60,7 @@ class ServerNotifier extends Notifier<ServerState?> {
   late final _receiveController = ReceiveController(_serverUtils);
   late final _sendController = SendController(_serverUtils);
 
-  ServerNotifier();
+  ServerService();
 
   @override
   ServerState? init() {
@@ -54,7 +78,11 @@ class ServerNotifier extends Notifier<ServerState?> {
   }
 
   /// Starts the server.
-  Future<ServerState?> startServer({required String alias, required int port, required bool https}) async {
+  Future<ServerState?> startServer({
+    required String alias,
+    required int port,
+    required bool https,
+  }) async {
     if (state != null) {
       _logger.info('Server already running.');
       return null;
@@ -69,7 +97,7 @@ class ServerNotifier extends Notifier<ServerState?> {
       port = defaultPort;
     }
 
-    final router = Router();
+    final router = SimpleServerRouteBuilder();
     final fingerprint = ref.read(securityProvider).certificateHash;
     _receiveController.installRoutes(
       router: router,
@@ -86,40 +114,37 @@ class ServerNotifier extends Notifier<ServerState?> {
     );
 
     _logger.info('Starting server...');
-    ServerState? newServerState;
 
+    final HttpServer httpServer;
     if (https) {
       final securityContext = ref.read(securityProvider);
-      newServerState = ServerState(
-        httpServer: await _startServer(
-          router: router,
-          port: port,
-          securityContext: SecurityContext()
-            ..usePrivateKeyBytes(securityContext.privateKey.codeUnits)
-            ..useCertificateChainBytes(securityContext.certificate.codeUnits),
-        ),
-        alias: alias,
-        port: port,
-        https: true,
-        session: null,
-        webSendState: null,
+      httpServer = await HttpServer.bindSecure(
+        '0.0.0.0',
+        port,
+        SecurityContext()
+          ..usePrivateKeyBytes(securityContext.privateKey.codeUnits)
+          ..useCertificateChainBytes(securityContext.certificate.codeUnits),
       );
-      _logger.info('Server started. (Port: ${newServerState.port}, HTTPS only)');
+      _logger.info('Server started. (Port: $port, HTTPS only)');
     } else {
-      newServerState = ServerState(
-        httpServer: await _startServer(
-          router: router,
-          port: port,
-          securityContext: null,
-        ),
-        alias: alias,
-        port: port,
-        https: false,
-        session: null,
-        webSendState: null,
+      httpServer = await HttpServer.bind(
+        '0.0.0.0',
+        port,
       );
-      _logger.info('Server started. (Port: ${newServerState.port}, HTTP only)');
+      _logger.info('Server started. (Port: $port, HTTP only)');
     }
+
+    final server = SimpleServer.start(server: httpServer, routes: router);
+
+    final newServerState = ServerState(
+      httpServer: server,
+      alias: alias,
+      port: port,
+      https: https,
+      session: null,
+      webSendState: null,
+      pinAttempts: {},
+    );
 
     state = newServerState;
     return newServerState;
@@ -127,7 +152,7 @@ class ServerNotifier extends Notifier<ServerState?> {
 
   Future<void> stopServer() async {
     _logger.info('Stopping server...');
-    await state?.httpServer.close(force: true);
+    await state?.httpServer.close();
     state = null;
     _logger.info('Server stopped.');
   }
@@ -175,6 +200,24 @@ class ServerNotifier extends Notifier<ServerState?> {
     await _sendController.initializeWebSend(files: files);
   }
 
+  /// Updates the web send pin.
+  void setWebSendPin(String? pin) {
+    state = state?.copyWith(
+      webSendState: state?.webSendState?.copyWith(
+        pin: pin,
+      ),
+    );
+  }
+
+  /// Updates the auto accept setting for web send.
+  void setWebSendAutoAccept(bool autoAccept) {
+    state = state?.copyWith(
+      webSendState: state?.webSendState?.copyWith(
+        autoAccept: autoAccept,
+      ),
+    );
+  }
+
   /// Accepts the web send request.
   void acceptWebSendRequest(String sessionId) {
     _sendController.acceptRequest(sessionId);
@@ -184,21 +227,6 @@ class ServerNotifier extends Notifier<ServerState?> {
   void declineWebSendRequest(String sessionId) {
     _sendController.declineRequest(sessionId);
   }
-}
-
-/// Starts the (actual) server.
-/// This binds the server to the given [port] and returns the [HttpServer] instance.
-Future<HttpServer> _startServer({
-  required Router router,
-  required int port,
-  required SecurityContext? securityContext,
-}) async {
-  return serve(
-    router,
-    '0.0.0.0',
-    port,
-    securityContext: securityContext,
-  );
 }
 
 // Below is a first prototype of mTLS (mutual TLS).

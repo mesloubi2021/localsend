@@ -1,24 +1,25 @@
 import 'package:collection/collection.dart';
+import 'package:common/model/device.dart';
+import 'package:common/model/session_status.dart';
 import 'package:flutter/material.dart';
 import 'package:localsend_app/model/cross_file.dart';
-import 'package:localsend_app/model/device.dart';
 import 'package:localsend_app/model/persistence/favorite_device.dart';
 import 'package:localsend_app/model/send_mode.dart';
-import 'package:localsend_app/model/session_status.dart';
 import 'package:localsend_app/pages/progress_page.dart';
 import 'package:localsend_app/pages/send_page.dart';
 import 'package:localsend_app/pages/web_send_page.dart';
 import 'package:localsend_app/provider/favorites_provider.dart';
 import 'package:localsend_app/provider/local_ip_provider.dart';
 import 'package:localsend_app/provider/network/nearby_devices_provider.dart';
-import 'package:localsend_app/provider/network/scan_provider.dart';
+import 'package:localsend_app/provider/network/scan_facade.dart';
 import 'package:localsend_app/provider/network/send_provider.dart';
 import 'package:localsend_app/provider/selection/selected_sending_files_provider.dart';
 import 'package:localsend_app/provider/settings_provider.dart';
-import 'package:localsend_app/util/native/ios_network_permission_helper.dart';
-import 'package:localsend_app/util/native/platform_check.dart';
+import 'package:localsend_app/util/favorites.dart';
 import 'package:localsend_app/widget/dialogs/address_input_dialog.dart';
+import 'package:localsend_app/widget/dialogs/favorite_delete_dialog.dart';
 import 'package:localsend_app/widget/dialogs/favorite_dialog.dart';
+import 'package:localsend_app/widget/dialogs/favorite_edit_dialog.dart';
 import 'package:localsend_app/widget/dialogs/no_files_dialog.dart';
 import 'package:refena_flutter/refena_flutter.dart';
 import 'package:routerino/routerino.dart';
@@ -32,7 +33,7 @@ class SendTabVm {
   final Future<void> Function(BuildContext context) onTapAddress;
   final Future<void> Function(BuildContext context) onTapFavorite;
   final Future<void> Function(BuildContext context, SendMode mode) onTapSendMode;
-  final Future<void> Function(Device device) onToggleFavorite;
+  final Future<void> Function(BuildContext context, Device device) onToggleFavorite;
   final Future<void> Function(BuildContext context, Device device) onTapDevice;
   final Future<void> Function(BuildContext context, Device device) onTapDeviceMultiSend;
 
@@ -63,7 +64,7 @@ final sendTabVmProvider = ViewProvider((ref) {
     selectedFiles: selectedFiles,
     localIps: localIps,
     nearbyDevices: nearbyDevices,
-    favoriteDevices: ref.watch(favoritesProvider),
+    favoriteDevices: favoriteDevices,
     onTapAddress: (context) async {
       final files = ref.read(selectedSendingFilesProvider);
       if (files.isEmpty) {
@@ -117,17 +118,18 @@ final sendTabVmProvider = ViewProvider((ref) {
         ref.notifier(sendProvider).clearAllSessions();
       }
     },
-    onToggleFavorite: (device) async {
-      final isFavorite = favoriteDevices.any((e) => e.fingerprint == device.fingerprint);
-      if (isFavorite) {
-        await ref.redux(favoritesProvider).dispatchAsync(RemoveFavoriteAction(deviceFingerprint: device.fingerprint));
+    onToggleFavorite: (context, device) async {
+      final favoriteDevice = favoriteDevices.findDevice(device);
+      if (favoriteDevice != null) {
+        final result = await showDialog<bool>(
+          context: context,
+          builder: (_) => FavoriteDeleteDialog(favoriteDevice),
+        );
+        if (result == true) {
+          await ref.redux(favoritesProvider).dispatchAsync(RemoveFavoriteAction(deviceFingerprint: device.fingerprint));
+        }
       } else {
-        await ref.redux(favoritesProvider).dispatchAsync(AddFavoriteAction(FavoriteDevice.fromValues(
-              fingerprint: device.fingerprint,
-              ip: device.ip,
-              port: device.port,
-              alias: device.alias,
-            )));
+        await showDialog(context: context, builder: (_) => FavoriteEditDialog(prefilledDevice: device));
       }
     },
     onTapDevice: (context, device) async {
@@ -190,13 +192,7 @@ class SendTabInitAction extends AsyncGlobalAction {
   Future<void> reduce() async {
     final devices = ref.read(nearbyDevicesProvider).devices;
     if (devices.isEmpty) {
-      await ref.read(scanProvider).startSmartScan(forceLegacy: false);
-      if (devices.isEmpty) {
-        // After the first complete scan, if devices aren't found on IOS a Network trigger is called
-        if (checkPlatform([TargetPlatform.iOS]) && context.mounted) {
-          checkIosNetworkPermission(context);
-        }
-      }
+      await dispatchAsync(StartSmartScan(forceLegacy: false));
     }
   }
 }

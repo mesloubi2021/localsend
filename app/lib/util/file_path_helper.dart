@@ -1,4 +1,4 @@
-import 'package:localsend_app/model/file_type.dart';
+import 'package:common/model/file_type.dart';
 
 /// Matches myFile-123 -> 123
 final _fileNumberRegex = RegExp(r'^(.*)(?:-(\d+))$');
@@ -49,8 +49,14 @@ extension FilePathStringExt on String {
     }
   }
 
+  String parentPath() {
+    final parts = replaceAll('\\', '/').split('/');
+    return parts.take(parts.length - 1).join('/');
+  }
+
   FileType guessFileType() {
     switch (extension) {
+      case 'bmp':
       case 'jpg':
       case 'jpeg':
       case 'heic':

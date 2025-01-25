@@ -1,21 +1,23 @@
 import 'dart:async';
+import 'dart:typed_data';
 
+import 'package:common/model/dto/file_dto.dart';
+import 'package:common/model/file_status.dart';
+import 'package:common/model/session_status.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:localsend_app/config/theme.dart';
 import 'package:localsend_app/gen/strings.g.dart';
-import 'package:localsend_app/model/dto/file_dto.dart';
-import 'package:localsend_app/model/file_status.dart';
-import 'package:localsend_app/model/session_status.dart';
-import 'package:localsend_app/pages/home_page.dart';
 import 'package:localsend_app/provider/network/send_provider.dart';
 import 'package:localsend_app/provider/network/server/server_provider.dart';
 import 'package:localsend_app/provider/progress_provider.dart';
-import 'package:localsend_app/theme.dart';
+import 'package:localsend_app/provider/settings_provider.dart';
 import 'package:localsend_app/util/file_size_helper.dart';
 import 'package:localsend_app/util/file_speed_helper.dart';
 import 'package:localsend_app/util/native/open_file.dart';
 import 'package:localsend_app/util/native/open_folder.dart';
 import 'package:localsend_app/util/native/platform_check.dart';
+import 'package:localsend_app/util/native/taskbar_helper.dart';
 import 'package:localsend_app/util/ui/nav_bar_padding.dart';
 import 'package:localsend_app/widget/custom_progress_bar.dart';
 import 'package:localsend_app/widget/dialogs/cancel_session_dialog.dart';
@@ -24,6 +26,7 @@ import 'package:localsend_app/widget/file_thumbnail.dart';
 import 'package:refena_flutter/refena_flutter.dart';
 import 'package:routerino/routerino.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
+import 'package:wechat_assets_picker/wechat_assets_picker.dart';
 
 class ProgressPage extends StatefulWidget {
   final bool showAppBar;
@@ -46,6 +49,12 @@ class _ProgressPageState extends State<ProgressPage> with Refena {
   String? _remainingTime;
   List<FileDto> _files = []; // also contains declined files (files without token)
   Set<String> _selectedFiles = {};
+  SessionStatus? _lastStatus;
+
+  // If [autoFinish] is enabled, we wait a few seconds before automatically closing the session.
+  int _finishCounter = 3;
+  Timer? _finishTimer;
+  Timer? _wakelockPlusTimer;
 
   bool _advanced = false;
 
@@ -56,8 +65,33 @@ class _ProgressPageState extends State<ProgressPage> with Refena {
     // init
     WidgetsBinding.instance.addPostFrameCallback((_) {
       try {
-        WakelockPlus.enable(); // ignore: discarded_futures
+        unawaited(WakelockPlus.enable());
       } catch (_) {}
+
+      // Periodically call WakelockPlus.enable() to keep the screen awake
+      _wakelockPlusTimer = Timer.periodic(const Duration(seconds: 30), (timer) {
+        try {
+          unawaited(WakelockPlus.enable());
+        } catch (_) {}
+      });
+
+      if (ref.read(settingsProvider).autoFinish) {
+        _finishTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+          final finished = ref.read(serverProvider)?.session?.files.values.map((e) => e.status).isFinishedOrSkipped ??
+              ref.read(sendProvider)[widget.sessionId]?.files.values.map((e) => e.status).isFinishedOrSkipped ??
+              true;
+          if (finished) {
+            if (_finishCounter == 1) {
+              timer.cancel();
+              _exit(closeSession: true);
+            } else {
+              setState(() {
+                _finishCounter--;
+              });
+            }
+          }
+        });
+      }
 
       setState(() {
         final receiveSession = ref.read(serverProvider)?.session;
@@ -79,41 +113,54 @@ class _ProgressPageState extends State<ProgressPage> with Refena {
     });
   }
 
-  @override
-  void dispose() {
-    super.dispose();
-    try {
-      unawaited(WakelockPlus.disable());
-    } catch (_) {}
-  }
-
-  Future<bool> _onWillPop() async {
-    final receiveSession = ref.watch(serverProvider.select((s) => s?.session));
-    final sendSession = ref.watch(sendProvider)[widget.sessionId];
+  void _exit({required bool closeSession}) async {
+    final receiveSession = ref.read(serverProvider.select((s) => s?.session));
+    final sendSession = ref.read(sendProvider)[widget.sessionId];
     final SessionStatus? status = receiveSession?.status ?? sendSession?.status;
-    if (status == null) {
-      return true;
+    final keepSession = !closeSession && (status == SessionStatus.sending || status == SessionStatus.finishedWithErrors);
+    final result = status == null || keepSession || await _askCancelConfirmation(status);
+
+    if (result && mounted) {
+      // ignore: unawaited_futures
+      context.popUntilRoot();
     }
-    if (!widget.closeSessionOnClose && (status == SessionStatus.sending || status == SessionStatus.finishedWithErrors)) {
-      // keep session except [closeSessionOnClose] is true and the session is active
-      return true;
-    }
-    return _askCancelConfirmation(status);
   }
 
   Future<bool> _askCancelConfirmation(SessionStatus status) async {
-    final bool result = status == SessionStatus.sending ? await context.pushBottomSheet(() => const CancelSessionDialog()) : true;
+    final bool result = switch (status == SessionStatus.sending) {
+      true => (await context.pushBottomSheet(() => const CancelSessionDialog())) == true,
+      false => true,
+    };
     if (result) {
       final receiveSession = ref.read(serverProvider)?.session;
       final sendState = ref.read(sendProvider)[widget.sessionId];
 
       if (receiveSession != null) {
-        ref.notifier(serverProvider).cancelSession();
+        if (receiveSession.status == SessionStatus.sending) {
+          ref.notifier(serverProvider).cancelSession();
+        } else {
+          ref.notifier(serverProvider).closeSession();
+        }
       } else if (sendState != null) {
-        ref.notifier(sendProvider).cancelSession(widget.sessionId);
+        if (sendState.status == SessionStatus.sending) {
+          ref.notifier(sendProvider).cancelSession(widget.sessionId);
+        } else {
+          ref.notifier(sendProvider).closeSession(widget.sessionId);
+        }
       }
     }
     return result;
+  }
+
+  @override
+  void dispose() {
+    super.dispose();
+    _finishTimer?.cancel();
+    _wakelockPlusTimer?.cancel();
+    TaskbarHelper.clearProgressBar(); // ignore: discarded_futures
+    try {
+      WakelockPlus.disable(); // ignore: discarded_futures
+    } catch (_) {}
   }
 
   @override
@@ -126,6 +173,16 @@ class _ProgressPageState extends State<ProgressPage> with Refena {
     final sendSession = ref.watch(sendProvider)[widget.sessionId];
 
     final SessionStatus? status = receiveSession?.status ?? sendSession?.status;
+
+    if (status == SessionStatus.sending) {
+      // ignore: discarded_futures
+      TaskbarHelper.setProgressBar(currBytes, _totalBytes);
+    } else if (status != _lastStatus) {
+      _lastStatus = status;
+      // ignore: discarded_futures
+      TaskbarHelper.visualizeStatus(status);
+    }
+
     if (status == null) {
       return Scaffold(
         body: Container(),
@@ -148,8 +205,19 @@ class _ProgressPageState extends State<ProgressPage> with Refena {
       speedInBytes = null;
     }
 
-    return WillPopScope(
-      onWillPop: _onWillPop,
+    final fileStatusMap = receiveSession?.files.map((k, f) => MapEntry(k, f.status)) ?? sendSession!.files.map((k, f) => MapEntry(k, f.status));
+    final finishedCount = fileStatusMap.values.where((s) => s == FileStatus.finished).length;
+
+    return PopScope(
+      onPopInvokedWithResult: (didPop, result) {
+        if (didPop) {
+          // Already popped.
+          // Because the user cannot pop this page, we can safely assume that all sessions are closed if they should be.
+          return;
+        }
+        _exit(closeSession: widget.closeSessionOnClose);
+      },
+      canPop: false,
       child: Scaffold(
         appBar: widget.showAppBar
             ? AppBar(
@@ -198,7 +266,7 @@ class _ProgressPageState extends State<ProgressPage> with Refena {
                                         ? null
                                         : (TapGestureRecognizer()
                                           ..onTap = () async {
-                                            await openFolder(receiveSession.destinationDirectory);
+                                            await openFolder(folderPath: receiveSession.destinationDirectory);
                                           }),
                                   ),
                                 ],
@@ -223,7 +291,7 @@ class _ProgressPageState extends State<ProgressPage> with Refena {
                 final file = _files[index - 2];
                 final String fileName = receiveSession?.files[file.id]?.desiredName ?? file.fileName;
 
-                final fileStatus = receiveSession?.files[file.id]?.status ?? sendSession!.files[file.id]!.status;
+                final fileStatus = fileStatusMap[file.id]!;
                 final savedToGallery = receiveSession?.files[file.id]?.savedToGallery ?? false;
 
                 final String? filePath;
@@ -244,6 +312,16 @@ class _ProgressPageState extends State<ProgressPage> with Refena {
                   errorMessage = null;
                 }
 
+                final Uint8List? thumbnail;
+                final AssetEntity? asset;
+                if (sendSession != null) {
+                  thumbnail = sendSession.files[file.id]!.thumbnail;
+                  asset = sendSession.files[file.id]!.asset;
+                } else {
+                  thumbnail = null;
+                  asset = null;
+                }
+
                 return Padding(
                   padding: const EdgeInsets.symmetric(vertical: 5),
                   child: InkWell(
@@ -255,17 +333,12 @@ class _ProgressPageState extends State<ProgressPage> with Refena {
                     child: Row(
                       crossAxisAlignment: CrossAxisAlignment.center,
                       children: [
-                        if (sendSession != null && sendSession.files[file.id]?.asset != null)
-                          // Special handling for assets
-                          AssetThumbnail(
-                            asset: sendSession.files[file.id]!.asset!,
-                            fileType: file.fileType,
-                          )
-                        else
-                          FilePathThumbnail(
-                            path: filePath,
-                            fileType: file.fileType,
-                          ),
+                        SmartFileThumbnail(
+                          bytes: thumbnail,
+                          asset: asset,
+                          path: filePath,
+                          fileType: file.fileType,
+                        ),
                         const SizedBox(width: 10),
                         Expanded(
                           child: Column(
@@ -322,6 +395,18 @@ class _ProgressPageState extends State<ProgressPage> with Refena {
                             ],
                           ),
                         ),
+                        if (sendSession != null && fileStatus == FileStatus.failed)
+                          IconButton(
+                            icon: const Icon(Icons.refresh),
+                            onPressed: () async {
+                              await ref.notifier(sendProvider).sendFile(
+                                    sessionId: widget.sessionId,
+                                    isolateIndex: 0,
+                                    file: sendSession.files[file.id]!,
+                                    isRetry: true,
+                                  );
+                            },
+                          ),
                       ],
                     ),
                   ),
@@ -347,9 +432,16 @@ class _ProgressPageState extends State<ProgressPage> with Refena {
                             style: const TextStyle(fontSize: 20),
                           ),
                           const SizedBox(height: 5),
-                          CustomProgressBar(
-                            progress: _totalBytes == 0 ? 0 : currBytes / _totalBytes,
-                            borderRadius: 5,
+                          TweenAnimationBuilder(
+                            tween: Tween<double>(begin: 0, end: _totalBytes == 0 ? 0 : currBytes / _totalBytes),
+                            duration: const Duration(milliseconds: 200),
+                            curve: Curves.easeOut,
+                            builder: (context, value, child) {
+                              return CustomProgressBar(
+                                progress: value,
+                                borderRadius: 5,
+                              );
+                            },
                           ),
                           AnimatedCrossFade(
                             crossFadeState: _advanced ? CrossFadeState.showSecond : CrossFadeState.showFirst,
@@ -362,7 +454,7 @@ class _ProgressPageState extends State<ProgressPage> with Refena {
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
                                   Text(t.progressPage.total.count(
-                                    curr: progressNotifier.getFinishedCount(widget.sessionId),
+                                    curr: finishedCount,
                                     n: _selectedFiles.length,
                                   )),
                                   Text(t.progressPage.total.size(
@@ -391,15 +483,13 @@ class _ProgressPageState extends State<ProgressPage> with Refena {
                               ),
                               TextButton.icon(
                                 style: TextButton.styleFrom(foregroundColor: Theme.of(context).colorScheme.onSurface),
-                                onPressed: () async {
-                                  final result = await _askCancelConfirmation(status);
-                                  if (result && mounted) {
-                                    final homeTab = receiveSession != null ? HomeTab.receive : HomeTab.send;
-                                    await context.pushRootImmediately(() => HomePage(initialTab: homeTab, appStart: false));
-                                  }
-                                },
+                                onPressed: () => _exit(closeSession: true),
                                 icon: Icon(status == SessionStatus.sending ? Icons.close : Icons.check_circle),
-                                label: Text(status == SessionStatus.sending ? t.general.cancel : t.general.done),
+                                label: Text(status == SessionStatus.sending
+                                    ? t.general.cancel
+                                    : _finishTimer != null
+                                        ? '${t.general.done} ($_finishCounter)'
+                                        : t.general.done),
                               ),
                             ],
                           )
